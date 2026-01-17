@@ -206,11 +206,11 @@ class DataCollectorBot(TradingBot):
         """Main entry point - register, connect, and run."""
         # Step 1: Register
         if not self.register():
-            return
+            raise ConnectionError(f"Failed to register with server at {self.host}. Check that the server is running and --host/--secure flags are correct.")
         
         # Step 2: Connect
         if not self.connect():
-            return
+            raise ConnectionError(f"Failed to connect to WebSocket at {self.host}")
         
         # Step 3: Run until complete
         print(f"[{self.student_id}] Running experiment '{self.experiment_name}'... Press Ctrl+C to stop")

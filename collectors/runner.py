@@ -118,6 +118,12 @@ def run_single_experiment(scenario: str, experiment_name: str, student_id: str,
     print(f"Description: {description}")
     print(f"{'='*70}\n")
     
+    # Check if using default localhost and warn
+    if host == "localhost:8080":
+        print("WARNING: Using default host 'localhost:8080'.")
+        print("If you're connecting to a remote server, specify --host <ip:port>")
+        print("If using HTTPS/WSS, add --secure flag\n")
+    
     bot = DataCollectorBot(
         student_id=student_id,
         host=host,
@@ -130,8 +136,18 @@ def run_single_experiment(scenario: str, experiment_name: str, student_id: str,
     try:
         bot.run()
         return True
+    except ConnectionError as e:
+        print(f"\n❌ CONNECTION ERROR: {e}")
+        print(f"\nTroubleshooting:")
+        print(f"  1. Is the server running?")
+        print(f"  2. Check --host flag: currently '{host}'")
+        print(f"  3. If using HTTPS/WSS, add --secure flag")
+        print(f"  4. Example: --host 3.98.52.120:8433 --secure")
+        return False
     except Exception as e:
-        print(f"ERROR running experiment: {e}")
+        print(f"\n❌ ERROR running experiment: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 

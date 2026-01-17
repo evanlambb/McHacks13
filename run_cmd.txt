@@ -1,0 +1,9 @@
+# Run all remaining experiments (quantity tests + aggressive trading)
+# PowerShell:
+.\run_experiments.ps1 -Name "Three-Bayesians" -Password "Limit_Up_Limit_D0wn!" -Server "3.98.52.120:8433" -Secure -Scenario "normal_market"
+
+# Or run individual experiments:
+python -m collectors.runner --scenario normal_market --experiment qty_100 --name Three-Bayesians --password Limit_Up_Limit_D0wn! --host 3.98.52.120:8433 --secure
+
+# Generate summary after all runs:
+python -m analysis.summary --summary

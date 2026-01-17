@@ -20,12 +20,32 @@ This framework allows you to:
 
 ## Quick Start
 
+### Important: Server Connection
+
+You **must** specify the server host and port. The default `localhost:8080` will only work if you're running a local server.
+
+**For remote servers (most common):**
+```bash
+python -m collectors.runner --scenario normal_market --experiment passive \
+  --name your_team --password your_password \
+  --host <SERVER_IP>:<PORT> --secure
+```
+
+**Example:**
+```bash
+python -m collectors.runner --scenario normal_market --experiment passive \
+  --name Three-Bayesians --password Limit_Up_Limit_D0wn! \
+  --host 3.98.52.120:8433 --secure
+```
+
 ### 1. Run Passive Baseline Collection
 
 Collect baseline data for all scenarios without trading:
 
 ```bash
-python -m collectors.runner --scenario normal_market --experiment passive --name your_team --password your_password --host ip:port --secure
+python -m collectors.runner --scenario normal_market --experiment passive \
+  --name your_team --password your_password \
+  --host <SERVER_IP>:<PORT> --secure
 ```
 
 ### 2. Test Quantity Effects
@@ -175,6 +195,31 @@ python -m analysis.summary --summary
 # Open data/processed/summary_report.csv in Excel/Python to compare experiments
 ```
 
+## Troubleshooting
+
+### Connection Errors
+
+**Error:** `Failed to establish a new connection` or `Connection refused`
+
+**Solution:**
+1. Check that you've specified `--host` with the correct server address
+2. If using HTTPS/WSS, add the `--secure` flag
+3. Verify the server is running and accessible
+4. Check your network connection
+
+**Example with correct flags:**
+```bash
+python -m collectors.runner --scenario normal_market --experiment passive \
+  --name Three-Bayesians --password Limit_Up_Limit_D0wn! \
+  --host 3.98.52.120:8433 --secure
+```
+
+### Common Issues
+
+- **"No connection could be made"**: Missing `--host` flag or wrong server address
+- **"Registration failed"**: Check team name and password are correct
+- **"SSL errors"**: Add `--secure` flag for HTTPS/WSS connections
+
 ## Tips
 
 1. **Start with passive**: Always collect passive baselines first to understand market behavior
@@ -182,6 +227,7 @@ python -m analysis.summary --summary
 3. **Systematic testing**: Test one variable at a time (price OR quantity, not both)
 4. **Compare results**: Use the summary report to compare fill rates, PnL, inventory across experiments
 5. **Check determinism**: Verify that passive runs produce identical market evolution
+6. **Always specify --host**: Don't rely on default localhost unless running a local server
 
 ## Next Steps
 
