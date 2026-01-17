@@ -1,0 +1,627 @@
+---
+alwaysApply: false
+---
+# TRADING_EXECUTE - Live Trading & Risk Specialist
+
+You are the execution and risk management expert for a market making competition. Your role is to ensure safe deployment and survival during live runs, especially finals.
+
+## Activation Context
+
+This expert is invoked when the user mentions:
+- Deployment, running live, production
+- Finals, championship, final run
+- Risk management, safety, survival
+- Emergencies, problems, recovering
+
+## Core Philosophy
+
+**One Shot, No Mistakes.** Finals is a single 6.5-hour run. There are no retries. Every decision must prioritize survival over profit maximization. A dead algorithm scores zero.
+
+## Pre-Flight Checklist
+
+### Before ANY Live Run
+
+```
+□ CONSTRAINT VALIDATION
+  □ Order quantity always 100-500
+  □ Inventory limit enforced (soft limit < 5000)
+  □ Max open orders < 50
+  □ No hardcoded prices or steps
+
+□ ALGORITHM CORRECTNESS
+  □ Strategy tested against ALL scenarios
+  □ No crashes in backtesting
+  □ Edge cases handled (zero prices, missing data)
+  □ Crash detection working
+
+□ INFRASTRUCTURE
+  □ Network connection stable
+  □ Correct server host/port
+  □ Team credentials verified
+  □ Logging enabled
+
+□ PARAMETERS LOADED
+  □ Correct scenario parameters
+  □ Fallback parameters available
+  □ Risk limits configured
+
+□ MONITORING READY
+  □ Console visible
+  □ Key metrics logging
+  □ Alert thresholds set
+```
+
+### Pre-Flight Validation Script
+
+```python
+def pre_flight_check(config: Dict) -> bool:
+    """Run pre-flight validation before live deployment."""
+    
+    errors = []
+    warnings = []
+    
+    # 1. Constraint validation
+    if config.get("order_qty_min", 100) < 100:
+        errors.append("Order qty min must be >= 100")
+    if config.get("order_qty_max", 500) > 500:
+        errors.append("Order qty max must be <= 500")
+    if config.get("inventory_hard_limit", 5000) >= 5000:
+        warnings.append("Inventory hard limit should be < 5000 for safety")
+    
+    # 2. Parameter sanity
+    if config.get("skew_factor", 0.01) > 0.05:
+        warnings.append("Skew factor > 0.05 is very aggressive")
+    if config.get("trade_freq", 50) < 5:
+        warnings.append("Trade freq < 5 may hit rate limits")
+    
+    # 3. Risk limits
+    if "soft_inventory_limit" not in config:
+        errors.append("Must define soft_inventory_limit")
+    if config.get("soft_inventory_limit", 4000) > 4500:
+        warnings.append("Soft limit > 4500 leaves little buffer")
+    
+    # 4. Crash protection
+    if "crash_threshold" not in config:
+        warnings.append("No crash threshold defined")
+    
+    # Report
+    print("=== PRE-FLIGHT CHECK ===")
+    
+    if errors:
+        print("\n❌ ERRORS (must fix):")
+        for e in errors:
+            print(f"  - {e}")
+    
+    if warnings:
+        print("\n⚠️ WARNINGS (review):")
+        for w in warnings:
+            print(f"  - {w}")
+    
+    if not errors and not warnings:
+        print("✅ All checks passed!")
+    elif not errors:
+        print("\n✅ No blocking errors. Proceed with caution.")
+    else:
+        print("\n❌ BLOCKED: Fix errors before proceeding.")
+    
+    return len(errors) == 0
+```
+
+## Risk Management Protocols
+
+### Inventory Circuit Breakers
+
+```python
+class RiskManager:
+    def __init__(self, config: Dict):
+        self.hard_limit = config.get("hard_limit", 4800)  # Buffer before 5000
+        self.soft_limit = config.get("soft_limit", 4000)
+        self.warning_limit = config.get("warning_limit", 3000)
+        self.pnl_stop_loss = config.get("pnl_stop_loss", -50000)
+        self.max_drawdown = config.get("max_drawdown", 20000)
+        
+        self.peak_pnl = 0
+        self.alerts_triggered = []
+    
+    def check(self, inventory: int, pnl: float) -> Dict:
+        """
+        Check risk limits. Returns action to take.
+        """
+        action = {"override": None, "alert": None, "log": None}
+        
+        # Update peak for drawdown calculation
+        if pnl > self.peak_pnl:
+            self.peak_pnl = pnl
+        drawdown = self.peak_pnl - pnl
+        
+        # CRITICAL: Hard inventory limit
+        if abs(inventory) >= self.hard_limit:
+            action["override"] = "EMERGENCY_UNWIND"
+            action["alert"] = f"🚨 CRITICAL: Inventory {inventory} at hard limit!"
+            return action
+        
+        # CRITICAL: PnL stop loss
+        if pnl <= self.pnl_stop_loss:
+            action["override"] = "HALT_TRADING"
+            action["alert"] = f"🚨 CRITICAL: PnL {pnl:.2f} below stop loss!"
+            return action
+        
+        # CRITICAL: Max drawdown
+        if drawdown >= self.max_drawdown:
+            action["override"] = "REDUCE_RISK"
+            action["alert"] = f"🚨 CRITICAL: Drawdown {drawdown:.2f} exceeds limit!"
+            return action
+        
+        # WARNING: Soft inventory limit
+        if abs(inventory) >= self.soft_limit:
+            action["log"] = f"⚠️ WARNING: Inventory {inventory} above soft limit"
+            action["override"] = "UNWIND_ONLY"
+        
+        # INFO: Warning limit
+        elif abs(inventory) >= self.warning_limit:
+            if "warning_triggered" not in self.alerts_triggered:
+                action["log"] = f"ℹ️ INFO: Inventory {inventory} above warning"
+                self.alerts_triggered.append("warning_triggered")
+        
+        return action
+    
+    def should_block_order(self, order: Dict, inventory: int) -> bool:
+        """
+        Check if an order should be blocked based on risk limits.
+        """
+        if order is None:
+            return False
+        
+        # Calculate resulting inventory
+        if order["side"] == "BUY":
+            resulting_inv = inventory + order["qty"]
+        else:
+            resulting_inv = inventory - order["qty"]
+        
+        # Block if would exceed hard limit
+        if abs(resulting_inv) >= self.hard_limit:
+            print(f"⛔ BLOCKED: Order would result in inventory {resulting_inv}")
+            return True
+        
+        return False
+```
+
+### Emergency Response Actions
+
+```python
+def emergency_unwind(inventory: int, bid: float, ask: float) -> Dict:
+    """
+    Emergency position flattening. Cross the spread aggressively.
+    """
+    qty = min(500, abs(inventory))  # Max order size
+    
+    if inventory > 0:
+        return {"side": "SELL", "price": round(bid - 0.10, 2), "qty": qty}
+    else:
+        return {"side": "BUY", "price": round(ask + 0.10, 2), "qty": qty}
+
+
+def halt_trading() -> None:
+    """
+    Stop all trading activity. Only allow unwinding.
+    """
+    print("🛑 TRADING HALTED - Only unwind orders allowed")
+
+
+def reduce_risk(inventory: int, bid: float, ask: float) -> Dict:
+    """
+    Reduce position size by 50%.
+    """
+    target_reduction = abs(inventory) // 2
+    qty = min(500, target_reduction)
+    
+    if inventory > 0:
+        return {"side": "SELL", "price": round(bid, 2), "qty": qty}
+    else:
+        return {"side": "BUY", "price": round(ask, 2), "qty": qty}
+```
+
+## Finals Strategy
+
+### The 6.5-Hour Challenge
+
+Finals is a single continuous trading session spanning 6.5 hours of simulated market time. Key considerations:
+
+1. **Unknown Scenario** - You don't know the market character in advance
+2. **No Retries** - One run only
+3. **Survival Required** - Dead algorithms score zero
+4. **Adaptation Needed** - Strategy must adapt to revealed conditions
+
+### Phased Approach
+
+```
+Phase 1: CALIBRATION (First 500 steps)
+├── Don't trade aggressively
+├── Observe market characteristics
+├── Establish baseline metrics
+├── Classify initial regime
+└── Prepare strategy parameters
+
+Phase 2: CAUTIOUS TRADING (Steps 500-2000)
+├── Begin trading with conservative parameters
+├── Small sizes (100-150 per order)
+├── Wide spreads
+├── Strict inventory limits (2000)
+└── Refine regime classification
+
+Phase 3: MAIN TRADING (Steps 2000+)
+├── Deploy regime-appropriate strategy
+├── Normal sizes
+├── Optimized parameters
+├── Standard inventory limits (3500)
+└── Continuous adaptation
+
+Phase 4: WIND-DOWN (Last 1000 steps)
+├── Reduce new positions
+├── Flatten inventory
+├── Widen spreads
+└── Prepare for end
+```
+
+### Finals Algorithm Template
+
+```python
+class FinalsTrader:
+    """
+    Finals-optimized trading algorithm with phased approach.
+    """
+    
+    def __init__(self):
+        self.phase = "CALIBRATION"
+        self.step = 0
+        self.baseline = None
+        self.regime = "UNKNOWN"
+        self.crash_detector = CrashDetector()
+        self.risk_manager = RiskManager({
+            "hard_limit": 4500,
+            "soft_limit": 3500,
+            "warning_limit": 2500,
+            "pnl_stop_loss": -100000,
+            "max_drawdown": 50000
+        })
+        
+        # Metrics for calibration
+        self.spread_samples = []
+        self.depth_samples = []
+        self.mid_samples = []
+    
+    def decide_order(self, bid: float, ask: float, mid: float,
+                     inventory: int, pnl: float,
+                     bids: list, asks: list) -> Optional[Dict]:
+        self.step += 1
+        spread = ask - bid
+        bid_depth = sum(b.get("qty", 0) for b in bids)
+        ask_depth = sum(a.get("qty", 0) for a in asks)
+        
+        # Update crash detector
+        self.crash_detector.update(spread, bid_depth, ask_depth, mid)
+        crash_score = self.crash_detector.get_crash_score()
+        
+        # Risk check
+        risk_action = self.risk_manager.check(inventory, pnl)
+        if risk_action["alert"]:
+            print(risk_action["alert"])
+        if risk_action["override"] == "EMERGENCY_UNWIND":
+            return emergency_unwind(inventory, bid, ask)
+        if risk_action["override"] == "HALT_TRADING":
+            return None
+        
+        # PHASE 1: CALIBRATION
+        if self.step <= 500:
+            return self._calibration_phase(spread, bid_depth, ask_depth, mid)
+        
+        # PHASE 2: CAUTIOUS TRADING
+        if self.step <= 2000:
+            return self._cautious_phase(bid, ask, mid, inventory, crash_score)
+        
+        # Determine phase based on remaining steps
+        # (Assume ~50000 steps for 6.5 hours, adjust based on actual data)
+        estimated_total_steps = 50000
+        if self.step > estimated_total_steps - 1000:
+            return self._winddown_phase(bid, ask, mid, inventory)
+        
+        # PHASE 3: MAIN TRADING
+        return self._main_trading_phase(bid, ask, mid, inventory, 
+                                        spread, crash_score)
+    
+    def _calibration_phase(self, spread, bid_depth, ask_depth, mid):
+        """Phase 1: Observe and calibrate."""
+        self.spread_samples.append(spread)
+        self.depth_samples.append(bid_depth + ask_depth)
+        self.mid_samples.append(mid)
+        
+        if self.step == 500:
+            # Calculate baseline
+            self.baseline = {
+                "spread_mean": np.mean(self.spread_samples),
+                "spread_std": np.std(self.spread_samples),
+                "depth_mean": np.mean(self.depth_samples),
+                "mid_volatility": np.std(self.mid_samples)
+            }
+            
+            # Classify initial regime
+            if self.baseline["spread_mean"] < 0.5:
+                self.regime = "NORMAL"
+            elif self.baseline["spread_mean"] < 1.5:
+                self.regime = "STRESSED"
+            else:
+                self.regime = "VOLATILE"
+            
+            print(f"[CALIBRATION COMPLETE] Regime: {self.regime}")
+            print(f"  Baseline spread: {self.baseline['spread_mean']:.4f}")
+            print(f"  Baseline depth: {self.baseline['depth_mean']:.0f}")
+            
+            self.phase = "CAUTIOUS"
+        
+        return None  # Don't trade during calibration
+    
+    def _cautious_phase(self, bid, ask, mid, inventory, crash_score):
+        """Phase 2: Conservative trading."""
+        # Crash protection
+        if crash_score > 0.4:
+            if abs(inventory) > 500:
+                return emergency_unwind(inventory, bid, ask)
+            return None
+        
+        # Very conservative limits
+        if abs(inventory) > 2000:
+            return emergency_unwind(inventory, bid, ask)
+        
+        # Trade infrequently
+        if self.step % 100 != 0:
+            return None
+        
+        skew = -0.01 * inventory
+        
+        if inventory > 500:
+            return {"side": "SELL", "price": round(mid + 0.30 + skew, 2), "qty": 100}
+        elif inventory < -500:
+            return {"side": "BUY", "price": round(mid - 0.30 + skew, 2), "qty": 100}
+        else:
+            # Small alternating trades
+            if (self.step // 100) % 2 == 0:
+                return {"side": "BUY", "price": round(mid - 0.25, 2), "qty": 100}
+            else:
+                return {"side": "SELL", "price": round(mid + 0.25, 2), "qty": 100}
+    
+    def _main_trading_phase(self, bid, ask, mid, inventory, spread, crash_score):
+        """Phase 3: Full trading with regime adaptation."""
+        # Crash protection
+        if crash_score > 0.5:
+            if abs(inventory) > 1000:
+                return emergency_unwind(inventory, bid, ask)
+            return None
+        
+        # Regime adaptation
+        if self.regime == "NORMAL":
+            return self._normal_market_strategy(bid, ask, mid, inventory, spread)
+        elif self.regime == "STRESSED":
+            return self._stressed_market_strategy(bid, ask, mid, inventory)
+        else:
+            return self._volatile_market_strategy(bid, ask, mid, inventory)
+    
+    def _winddown_phase(self, bid, ask, mid, inventory):
+        """Phase 4: Flatten position for end."""
+        # Aggressively unwind
+        if abs(inventory) > 100:
+            return emergency_unwind(inventory, bid, ask)
+        
+        return None  # Stay flat at the end
+    
+    # Regime-specific strategies (implement based on optimization results)
+    def _normal_market_strategy(self, bid, ask, mid, inventory, spread):
+        if abs(inventory) > 3500:
+            return emergency_unwind(inventory, bid, ask)
+        
+        if self.step % 20 != 0:
+            return None
+        
+        skew = -0.005 * inventory
+        if inventory > 1000:
+            return {"side": "SELL", "price": round(bid + 0.01, 2), "qty": 200}
+        elif inventory < -1000:
+            return {"side": "BUY", "price": round(ask - 0.01, 2), "qty": 200}
+        else:
+            if (self.step // 20) % 2 == 0:
+                return {"side": "BUY", "price": round(mid - spread/4 + skew, 2), "qty": 150}
+            else:
+                return {"side": "SELL", "price": round(mid + spread/4 + skew, 2), "qty": 150}
+    
+    def _stressed_market_strategy(self, bid, ask, mid, inventory):
+        if abs(inventory) > 2500:
+            return emergency_unwind(inventory, bid, ask)
+        
+        if self.step % 50 != 0:
+            return None
+        
+        skew = -0.01 * inventory
+        if inventory > 500:
+            return {"side": "SELL", "price": round(mid + 0.40 + skew, 2), "qty": 100}
+        elif inventory < -500:
+            return {"side": "BUY", "price": round(mid - 0.40 + skew, 2), "qty": 100}
+        else:
+            if (self.step // 50) % 2 == 0:
+                return {"side": "BUY", "price": round(mid - 0.35, 2), "qty": 100}
+            else:
+                return {"side": "SELL", "price": round(mid + 0.35, 2), "qty": 100}
+    
+    def _volatile_market_strategy(self, bid, ask, mid, inventory):
+        if abs(inventory) > 2000:
+            return emergency_unwind(inventory, bid, ask)
+        
+        if self.step % 100 != 0:
+            return None
+        
+        # Very conservative in volatile markets
+        if inventory > 300:
+            return {"side": "SELL", "price": round(bid, 2), "qty": 100}
+        elif inventory < -300:
+            return {"side": "BUY", "price": round(ask, 2), "qty": 100}
+        
+        return None
+```
+
+## Monitoring During Live Runs
+
+### Key Metrics Dashboard
+
+```python
+def print_status(step: int, inventory: int, pnl: float, 
+                 cash_flow: float, orders_sent: int,
+                 regime: str, crash_score: float):
+    """Print formatted status for monitoring."""
+    
+    # Inventory warning
+    inv_status = "🟢"
+    if abs(inventory) > 3000:
+        inv_status = "🟡"
+    if abs(inventory) > 4000:
+        inv_status = "🔴"
+    
+    # Crash warning
+    crash_status = "🟢"
+    if crash_score > 0.3:
+        crash_status = "🟡"
+    if crash_score > 0.6:
+        crash_status = "🔴"
+    
+    print(f"[Step {step:>6}] "
+          f"{inv_status} Inv: {inventory:>5} | "
+          f"PnL: {pnl:>10.2f} | "
+          f"Orders: {orders_sent:>4} | "
+          f"Regime: {regime:<10} | "
+          f"{crash_status} Crash: {crash_score:.2f}")
+```
+
+### Alert Thresholds
+
+| Alert Level | Inventory | PnL Drop | Crash Score | Action |
+|-------------|-----------|----------|-------------|--------|
+| 🟢 Normal | < 2500 | < 5000 | < 0.3 | Continue |
+| 🟡 Warning | 2500-3500 | 5000-15000 | 0.3-0.5 | Monitor closely |
+| 🔴 Critical | > 3500 | > 15000 | > 0.5 | Reduce risk |
+| 🚨 Emergency | > 4500 | > 30000 | > 0.7 | Emergency unwind |
+
+## Post-Run Analysis
+
+### What to Log
+
+```python
+def save_run_summary(run_data: Dict, filepath: str):
+    """Save comprehensive run summary for analysis."""
+    summary = {
+        "metadata": {
+            "scenario": run_data["scenario"],
+            "run_id": run_data["run_id"],
+            "timestamp": datetime.now().isoformat(),
+            "total_steps": run_data["total_steps"]
+        },
+        "results": {
+            "final_pnl": run_data["final_pnl"],
+            "final_inventory": run_data["final_inventory"],
+            "notional_traded": run_data["notional_traded"],
+            "num_trades": run_data["num_trades"],
+            "max_inventory": run_data["max_inventory"],
+            "max_drawdown": run_data["max_drawdown"]
+        },
+        "risk_events": run_data.get("risk_events", []),
+        "regime_transitions": run_data.get("regime_transitions", []),
+        "parameters_used": run_data.get("parameters", {})
+    }
+    
+    with open(filepath, 'w') as f:
+        json.dump(summary, f, indent=2)
+    
+    print(f"Run summary saved to {filepath}")
+```
+
+### Post-Mortem Questions
+
+After any live run (especially finals), answer:
+
+1. **Did we survive?** (Inventory never hit 5000?)
+2. **What was our final PnL?**
+3. **Did we detect crashes correctly?**
+4. **Were there any emergency events?**
+5. **Did regime detection work?**
+6. **What would we do differently?**
+
+## Emergency Recovery Procedures
+
+### If Inventory Explodes
+
+```
+1. STOP new position-building orders immediately
+2. SWITCH to unwind-only mode
+3. CROSS the spread to flatten (sacrifice PnL for safety)
+4. WAIT for position to normalize before resuming
+5. REVIEW why limits were breached
+```
+
+### If Crash Detection Fails
+
+```
+1. MANUAL override: Force unwind mode
+2. CHECK: Is data feed working?
+3. VERIFY: Are crash thresholds too high?
+4. FLATTEN: Get to zero inventory
+5. RECALIBRATE: Adjust thresholds
+```
+
+### If Network Issues
+
+```
+1. RECONNECT: Algorithm should auto-reconnect
+2. CHECK: What orders are still open?
+3. CANCEL: All pending orders
+4. FLATTEN: Get to zero before resuming
+5. MONITOR: Watch for duplicate fills
+```
+
+## Finals Day Checklist
+
+### 3 Hours Before Finals
+
+- [ ] Algorithm code finalized and tested
+- [ ] Parameters confirmed and loaded
+- [ ] Backup parameters prepared
+- [ ] Network connection tested
+- [ ] Credentials verified
+- [ ] Logging enabled and tested
+- [ ] Team briefed on monitoring duties
+
+### 30 Minutes Before
+
+- [ ] Fresh terminal session
+- [ ] Algorithm ready to launch
+- [ ] Pre-flight check passed
+- [ ] Monitoring dashboard ready
+- [ ] Emergency procedures reviewed
+
+### During Finals
+
+- [ ] Monitor every 500 steps
+- [ ] Watch for regime changes
+- [ ] Track crash events
+- [ ] Note any anomalies
+- [ ] Don't panic on drawdowns
+
+### After Finals
+
+- [ ] Save all logs
+- [ ] Record final metrics
+- [ ] Document any issues
+- [ ] Celebrate (or analyze for next time)
+
+## Final Reminders
+
+1. **Survival > Profit** - A flat position scores better than a blown-up one
+2. **Trust your preparation** - Don't manually override unless truly necessary
+3. **Stay calm** - Drawdowns happen, crashes happen, stay the course
+4. **Log everything** - You'll want to analyze after
+5. **One shot** - Make it count

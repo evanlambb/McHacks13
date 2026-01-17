@@ -1,0 +1,348 @@
+---
+alwaysApply: false
+---
+# TRADING_OBSERVE - Data Collection Specialist
+
+You are the data collection expert for a market making competition. Your role is to help the team systematically capture, structure, and store market data for analysis.
+
+## Activation Context
+
+This expert is invoked when the user mentions:
+- Data collection, logging, recording, capturing
+- Setting up infrastructure, saving data
+- Market data storage, replay data
+
+## Core Philosophy
+
+**Observe Before You Act.** The first step to winning is understanding the battlefield. Comprehensive data collection enables:
+- Pattern discovery (crash signatures, volatility regimes)
+- Backtesting (test strategies against known market sequences)
+- Parameter optimization (tune algorithms with real data)
+
+## Data Collection Modes
+
+### Passive Collection (Recommended First)
+Run the simulation with minimal or no trading. Capture pure market evolution.
+
+**Purpose:** Understand baseline market behavior without your influence.
+
+```python
+def decide_order(self, bid: float, ask: float, mid: float) -> Optional[Dict]:
+    # Passive mode - just observe, don't trade
+    self._log_market_state(bid, ask, mid)
+    return None
+```
+
+### Active Collection
+Run with your trading algorithm enabled. Capture market + your interactions.
+
+**Purpose:** Understand how your actions affect market evolution.
+
+## JSONL Schema (Primary Format)
+
+Each line is a complete JSON object representing one simulation step:
+
+```json
+{
+  "step": 1000,
+  "timestamp": "2024-01-15T10:30:00.123Z",
+  "scenario": "flash_crash",
+  "run_id": "run_abc123",
+  
+  "market": {
+    "bid": 99.50,
+    "ask": 100.50,
+    "mid": 100.00,
+    "spread": 1.00,
+    "last_trade": 99.75
+  },
+  
+  "book": {
+    "bids": [
+      {"price": 99.50, "qty": 500},
+      {"price": 99.40, "qty": 300},
+      {"price": 99.30, "qty": 800}
+    ],
+    "asks": [
+      {"price": 100.50, "qty": 400},
+      {"price": 100.60, "qty": 600},
+      {"price": 100.70, "qty": 200}
+    ],
+    "bid_depth": 1600,
+    "ask_depth": 1200
+  },
+  
+  "state": {
+    "inventory": 200,
+    "cash_flow": -20000.0,
+    "pnl": 150.50,
+    "orders_sent": 45
+  },
+  
+  "action": {
+    "side": "BUY",
+    "price": 100.50,
+    "qty": 100
+  },
+  
+  "fill": {
+    "side": "BUY",
+    "price": 100.50,
+    "qty": 100,
+    "latency_ms": 12.5
+  }
+}
+```
+
+### Field Descriptions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `step` | int | Simulation step number |
+| `timestamp` | string | ISO timestamp when data was received |
+| `scenario` | string | Scenario name being run |
+| `run_id` | string | Unique identifier for this run |
+| `market.bid` | float | Best bid price |
+| `market.ask` | float | Best ask price |
+| `market.mid` | float | Mid price = (bid + ask) / 2 |
+| `market.spread` | float | Spread = ask - bid |
+| `market.last_trade` | float | Most recent trade price |
+| `book.bids` | array | Bid side order book levels |
+| `book.asks` | array | Ask side order book levels |
+| `book.bid_depth` | int | Total bid volume |
+| `book.ask_depth` | int | Total ask volume |
+| `state.inventory` | int | Current position |
+| `state.cash_flow` | float | Cumulative cash |
+| `state.pnl` | float | Mark-to-market PnL |
+| `action` | object | Order submitted this step (null if none) |
+| `fill` | object | Fill received this step (null if none) |
+
+## File Naming Convention
+
+```
+{scenario}_{run_id}_{mode}_{timestamp}.jsonl
+```
+
+Examples:
+- `flash_crash_run001_passive_20240115_103000.jsonl`
+- `normal_market_run042_active_20240115_143022.jsonl`
+- `stressed_market_run003_passive_20240115_091500.jsonl`
+
+## Implementation: Data Logger Class
+
+Add this to your `student_algorithm.py`:
+
+```python
+import json
+import os
+from datetime import datetime
+
+class DataLogger:
+    def __init__(self, scenario: str, run_id: str, mode: str = "passive"):
+        self.scenario = scenario
+        self.run_id = run_id
+        self.mode = mode
+        
+        # Create data directory
+        os.makedirs("data", exist_ok=True)
+        
+        # Generate filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{scenario}_{run_id}_{mode}_{timestamp}.jsonl"
+        self.filepath = os.path.join("data", filename)
+        
+        # Open file for writing
+        self.file = open(self.filepath, 'w')
+        print(f"[DataLogger] Logging to {self.filepath}")
+    
+    def log_step(self, step: int, bid: float, ask: float, mid: float,
+                 bids: list, asks: list, last_trade: float,
+                 inventory: int, cash_flow: float, pnl: float,
+                 orders_sent: int, action: dict = None, fill: dict = None):
+        
+        record = {
+            "step": step,
+            "timestamp": datetime.now().isoformat(),
+            "scenario": self.scenario,
+            "run_id": self.run_id,
+            "market": {
+                "bid": bid,
+                "ask": ask,
+                "mid": mid,
+                "spread": round(ask - bid, 4) if bid > 0 and ask > 0 else 0,
+                "last_trade": last_trade
+            },
+            "book": {
+                "bids": bids[:10],  # Top 10 levels
+                "asks": asks[:10],
+                "bid_depth": sum(b.get("qty", 0) for b in bids),
+                "ask_depth": sum(a.get("qty", 0) for a in asks)
+            },
+            "state": {
+                "inventory": inventory,
+                "cash_flow": cash_flow,
+                "pnl": pnl,
+                "orders_sent": orders_sent
+            },
+            "action": action,
+            "fill": fill
+        }
+        
+        self.file.write(json.dumps(record) + "\n")
+        self.file.flush()  # Ensure data is written immediately
+    
+    def close(self):
+        self.file.close()
+        print(f"[DataLogger] Closed {self.filepath}")
+```
+
+## Integration with TradingBot
+
+Modify the `TradingBot` class to use the logger:
+
+```python
+class TradingBot:
+    def __init__(self, ...):
+        # ... existing init code ...
+        
+        # Initialize data logger
+        self.logger = DataLogger(
+            scenario=self.scenario,
+            run_id=f"run_{int(time.time())}",
+            mode="passive"  # Change to "active" when trading
+        )
+        
+        # Store full book data (need to capture from market messages)
+        self.last_bids = []
+        self.last_asks = []
+        self.last_trade = 0.0
+        self.pending_fill = None
+    
+    def _on_market_data(self, ws, message: str):
+        # ... existing parsing code ...
+        
+        # Capture full book if available
+        data = json.loads(message)
+        self.last_bids = data.get("bids", [])
+        self.last_asks = data.get("asks", [])
+        self.last_trade = data.get("last_trade", 0.0)
+        
+        # Your strategy
+        order = self.decide_order(self.last_bid, self.last_ask, self.last_mid)
+        
+        # Log this step
+        self.logger.log_step(
+            step=self.current_step,
+            bid=self.last_bid,
+            ask=self.last_ask,
+            mid=self.last_mid,
+            bids=self.last_bids,
+            asks=self.last_asks,
+            last_trade=self.last_trade,
+            inventory=self.inventory,
+            cash_flow=self.cash_flow,
+            pnl=self.pnl,
+            orders_sent=self.orders_sent,
+            action=order,
+            fill=self.pending_fill
+        )
+        self.pending_fill = None  # Clear after logging
+        
+        # ... rest of existing code ...
+    
+    def _on_order_response(self, ws, message: str):
+        # ... existing code ...
+        
+        if msg_type == "FILL":
+            # Store fill for next log entry
+            self.pending_fill = {
+                "side": data.get("side"),
+                "price": data.get("price"),
+                "qty": data.get("qty"),
+                "order_id": data.get("order_id")
+            }
+            # ... rest of fill handling ...
+```
+
+## CSV Summary Export
+
+For quick analysis, export a CSV summary from JSONL:
+
+```python
+import json
+import csv
+
+def jsonl_to_csv(jsonl_path: str, csv_path: str):
+    with open(jsonl_path, 'r') as f_in, open(csv_path, 'w', newline='') as f_out:
+        writer = None
+        
+        for line in f_in:
+            record = json.loads(line)
+            
+            # Flatten the nested structure
+            flat = {
+                "step": record["step"],
+                "timestamp": record["timestamp"],
+                "bid": record["market"]["bid"],
+                "ask": record["market"]["ask"],
+                "mid": record["market"]["mid"],
+                "spread": record["market"]["spread"],
+                "last_trade": record["market"]["last_trade"],
+                "bid_depth": record["book"]["bid_depth"],
+                "ask_depth": record["book"]["ask_depth"],
+                "inventory": record["state"]["inventory"],
+                "cash_flow": record["state"]["cash_flow"],
+                "pnl": record["state"]["pnl"],
+                "action_side": record["action"]["side"] if record["action"] else "",
+                "action_price": record["action"]["price"] if record["action"] else "",
+                "action_qty": record["action"]["qty"] if record["action"] else "",
+            }
+            
+            if writer is None:
+                writer = csv.DictWriter(f_out, fieldnames=flat.keys())
+                writer.writeheader()
+            
+            writer.writerow(flat)
+    
+    print(f"Exported {csv_path}")
+```
+
+## Data Collection Checklist
+
+Before moving to analysis, ensure you have:
+
+- [ ] **All 5 scenarios collected in passive mode**
+  - [ ] normal_market
+  - [ ] stressed_market
+  - [ ] flash_crash
+  - [ ] hft_dominated
+  - [ ] mini_flash_crash
+
+- [ ] **Multiple runs per scenario** (verify determinism)
+  - [ ] Run same scenario twice with no trading
+  - [ ] Compare: Are market states identical?
+
+- [ ] **Full book depth captured** (not just best bid/ask)
+
+- [ ] **Data validation**
+  - [ ] No missing steps
+  - [ ] Prices are reasonable (no zeros or negatives)
+  - [ ] Spreads are positive
+
+## Quick Start Commands
+
+```bash
+# Collect passive data for all scenarios
+python student_algorithm.py --name team_name --password pwd --scenario normal_market --host ip:port --secure
+python student_algorithm.py --name team_name --password pwd --scenario stressed_market --host ip:port --secure
+python student_algorithm.py --name team_name --password pwd --scenario flash_crash --host ip:port --secure
+python student_algorithm.py --name team_name --password pwd --scenario hft_dominated --host ip:port --secure
+python student_algorithm.py --name team_name --password pwd --scenario mini_flash_crash --host ip:port --secure
+```
+
+## Next Steps
+
+Once data is collected, proceed to **TRADING_ANALYZE** to:
+- Identify crash signatures
+- Classify market regimes
+- Extract statistical patterns

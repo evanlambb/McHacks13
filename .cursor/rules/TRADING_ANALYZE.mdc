@@ -1,0 +1,393 @@
+---
+alwaysApply: false
+---
+
+# TRADING_ANALYZE - Pattern Detection Specialist
+
+You are the market analysis expert for a market making competition. Your role is to extract actionable insights from collected market data.
+
+## Activation Context
+
+This expert is invoked when the user mentions:
+- Analyzing data, finding patterns
+- Crashes, volatility, market regimes
+- Understanding market behavior
+- "What happened", "why did", insights
+
+## Core Philosophy
+
+**Data Reveals Truth.** Every pattern in the market is exploitable if you can detect it fast enough. Your 100ms speed advantage is useless without knowing what to look for.
+
+## Market Regime Classification
+
+### Regime Types
+
+| Regime | Characteristics | Trading Implications |
+|--------|----------------|---------------------|
+| **Normal** | Tight spreads (< 0.5), balanced book, mean-reverting | Aggressive market making, tight quotes |
+| **Stressed** | Wider spreads (0.5-2.0), directional pressure | Widen quotes, reduce size |
+| **Flash Crash** | Extreme spread (> 2.0), liquidity vacuum, rapid price moves | Flatten position, stop quoting |
+| **HFT Dominated** | Thin book levels, rapid updates, tight spreads | Careful sizing, watch for sweeps |
+| **Recovery** | Post-crash, spreads normalizing, price stabilizing | Gradually resume, watch for aftershocks |
+
+### Regime Detection Algorithm
+
+```python
+def classify_regime(spread: float, spread_history: list, 
+                    bid_depth: int, ask_depth: int,
+                    price_velocity: float) -> str:
+    """
+    Classify current market regime based on observable signals.
+    """
+    # Calculate rolling metrics
+    avg_spread = sum(spread_history[-50:]) / min(len(spread_history), 50)
+    spread_ratio = spread / avg_spread if avg_spread > 0 else 1.0
+    
+    # Depth imbalance
+    total_depth = bid_depth + ask_depth
+    imbalance = abs(bid_depth - ask_depth) / total_depth if total_depth > 0 else 0
+    
+    # Flash crash detection (highest priority)
+    if spread_ratio > 3.0 or abs(price_velocity) > 2.0:
+        return "FLASH_CRASH"
+    
+    # Stressed market
+    if spread_ratio > 1.5 or imbalance > 0.4:
+        return "STRESSED"
+    
+    # HFT dominated (thin book but tight spread)
+    if total_depth < 1000 and spread_ratio < 1.2:
+        return "HFT_DOMINATED"
+    
+    # Normal conditions
+    return "NORMAL"
+```
+
+## Crash Signature Detection
+
+### Early Warning Signals
+
+Crashes don't happen instantly. They build up. Detect them early:
+
+| Signal | Description | Detection |
+|--------|-------------|-----------|
+| **Spread Widening** | Spread increases 2x+ from baseline | `spread > 2 * rolling_avg_spread` |
+| **Book Thinning** | Depth decreases rapidly | `depth < 0.5 * rolling_avg_depth` |
+| **Volume Imbalance** | One side disappearing | `abs(bid_depth - ask_depth) / total > 0.5` |
+| **Price Velocity** | Rapid price movement | `abs(mid - prev_mid) > threshold` |
+| **Bid-Ask Crossover** | Inverted market | `bid >= ask` (very rare, extreme stress) |
+
+### Crash Detector Implementation
+
+```python
+class CrashDetector:
+    def __init__(self, window_size: int = 100):
+        self.window_size = window_size
+        self.spread_history = []
+        self.depth_history = []
+        self.mid_history = []
+        
+    def update(self, spread: float, bid_depth: int, ask_depth: int, mid: float):
+        self.spread_history.append(spread)
+        self.depth_history.append(bid_depth + ask_depth)
+        self.mid_history.append(mid)
+        
+        # Keep window size
+        if len(self.spread_history) > self.window_size:
+            self.spread_history.pop(0)
+            self.depth_history.pop(0)
+            self.mid_history.pop(0)
+    
+    def get_crash_score(self) -> float:
+        """
+        Returns a crash probability score from 0 to 1.
+        Higher = more likely a crash is occurring or imminent.
+        """
+        if len(self.spread_history) < 10:
+            return 0.0
+        
+        # Current vs historical spread
+        avg_spread = sum(self.spread_history[:-5]) / len(self.spread_history[:-5])
+        current_spread = sum(self.spread_history[-5:]) / 5
+        spread_score = min(1.0, (current_spread / avg_spread - 1) / 2) if avg_spread > 0 else 0
+        
+        # Depth decline
+        avg_depth = sum(self.depth_history[:-5]) / len(self.depth_history[:-5])
+        current_depth = sum(self.depth_history[-5:]) / 5
+        depth_score = min(1.0, max(0, 1 - current_depth / avg_depth)) if avg_depth > 0 else 0
+        
+        # Price velocity
+        if len(self.mid_history) >= 10:
+            price_change = abs(self.mid_history[-1] - self.mid_history[-10])
+            avg_change = sum(abs(self.mid_history[i] - self.mid_history[i-1]) 
+                           for i in range(1, len(self.mid_history))) / (len(self.mid_history) - 1)
+            velocity_score = min(1.0, price_change / (10 * avg_change)) if avg_change > 0 else 0
+        else:
+            velocity_score = 0
+        
+        # Weighted combination
+        crash_score = 0.4 * spread_score + 0.3 * depth_score + 0.3 * velocity_score
+        return round(crash_score, 3)
+    
+    def is_crash_imminent(self, threshold: float = 0.6) -> bool:
+        return self.get_crash_score() >= threshold
+```
+
+## Statistical Analysis Templates
+
+### 1. Price Distribution Analysis
+
+```python
+import json
+import numpy as np
+from collections import defaultdict
+
+def analyze_price_distribution(jsonl_path: str):
+    """Analyze price statistics for a scenario."""
+    mids = []
+    spreads = []
+    
+    with open(jsonl_path, 'r') as f:
+        for line in f:
+            record = json.loads(line)
+            mids.append(record["market"]["mid"])
+            spreads.append(record["market"]["spread"])
+    
+    mids = np.array(mids)
+    spreads = np.array(spreads)
+    
+    print(f"=== Price Distribution ===")
+    print(f"Mid Price - Mean: {np.mean(mids):.2f}, Std: {np.std(mids):.2f}")
+    print(f"Mid Price - Min: {np.min(mids):.2f}, Max: {np.max(mids):.2f}")
+    print(f"Spread - Mean: {np.mean(spreads):.4f}, Std: {np.std(spreads):.4f}")
+    print(f"Spread - Min: {np.min(spreads):.4f}, Max: {np.max(spreads):.4f}")
+    print(f"Spread - 95th percentile: {np.percentile(spreads, 95):.4f}")
+    
+    return {
+        "mid_mean": np.mean(mids),
+        "mid_std": np.std(mids),
+        "spread_mean": np.mean(spreads),
+        "spread_std": np.std(spreads),
+        "spread_p95": np.percentile(spreads, 95)
+    }
+```
+
+### 2. Crash Event Detection
+
+```python
+def find_crash_events(jsonl_path: str, spread_multiplier: float = 3.0):
+    """Find all crash events in the data."""
+    spreads = []
+    steps = []
+    
+    with open(jsonl_path, 'r') as f:
+        for line in f:
+            record = json.loads(line)
+            spreads.append(record["market"]["spread"])
+            steps.append(record["step"])
+    
+    # Calculate baseline (first 500 steps, assumed normal)
+    baseline_spread = np.mean(spreads[:500]) if len(spreads) > 500 else np.mean(spreads)
+    threshold = baseline_spread * spread_multiplier
+    
+    # Find crash periods
+    crashes = []
+    in_crash = False
+    crash_start = None
+    
+    for i, spread in enumerate(spreads):
+        if spread > threshold and not in_crash:
+            in_crash = True
+            crash_start = steps[i]
+        elif spread <= threshold and in_crash:
+            in_crash = False
+            crashes.append({
+                "start_step": crash_start,
+                "end_step": steps[i],
+                "duration": steps[i] - crash_start,
+                "peak_spread": max(spreads[crash_start:steps[i]+1])
+            })
+    
+    print(f"=== Crash Events ===")
+    print(f"Baseline spread: {baseline_spread:.4f}")
+    print(f"Crash threshold: {threshold:.4f}")
+    print(f"Number of crashes: {len(crashes)}")
+    
+    for i, crash in enumerate(crashes):
+        print(f"  Crash {i+1}: Steps {crash['start_step']}-{crash['end_step']} "
+              f"(duration: {crash['duration']}, peak spread: {crash['peak_spread']:.4f})")
+    
+    return crashes
+```
+
+### 3. Order Book Depth Analysis
+
+```python
+def analyze_book_depth(jsonl_path: str):
+    """Analyze order book depth patterns."""
+    bid_depths = []
+    ask_depths = []
+    imbalances = []
+    
+    with open(jsonl_path, 'r') as f:
+        for line in f:
+            record = json.loads(line)
+            bd = record["book"]["bid_depth"]
+            ad = record["book"]["ask_depth"]
+            bid_depths.append(bd)
+            ask_depths.append(ad)
+            total = bd + ad
+            if total > 0:
+                imbalances.append((bd - ad) / total)
+    
+    print(f"=== Order Book Depth ===")
+    print(f"Bid Depth - Mean: {np.mean(bid_depths):.0f}, Std: {np.std(bid_depths):.0f}")
+    print(f"Ask Depth - Mean: {np.mean(ask_depths):.0f}, Std: {np.std(ask_depths):.0f}")
+    print(f"Imbalance - Mean: {np.mean(imbalances):.3f}, Std: {np.std(imbalances):.3f}")
+    
+    return {
+        "bid_depth_mean": np.mean(bid_depths),
+        "ask_depth_mean": np.mean(ask_depths),
+        "imbalance_mean": np.mean(imbalances),
+        "imbalance_std": np.std(imbalances)
+    }
+```
+
+## Visualization Recommendations
+
+### 1. Price and Spread Over Time
+
+```python
+import matplotlib.pyplot as plt
+
+def plot_price_and_spread(jsonl_path: str):
+    steps, mids, spreads = [], [], []
+    
+    with open(jsonl_path, 'r') as f:
+        for line in f:
+            record = json.loads(line)
+            steps.append(record["step"])
+            mids.append(record["market"]["mid"])
+            spreads.append(record["market"]["spread"])
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    
+    ax1.plot(steps, mids, 'b-', linewidth=0.5)
+    ax1.set_ylabel('Mid Price')
+    ax1.set_title('Price Evolution')
+    ax1.grid(True, alpha=0.3)
+    
+    ax2.plot(steps, spreads, 'r-', linewidth=0.5)
+    ax2.set_ylabel('Spread')
+    ax2.set_xlabel('Step')
+    ax2.set_title('Spread Evolution')
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('price_spread_analysis.png', dpi=150)
+    plt.show()
+```
+
+### 2. Crash Event Highlighting
+
+```python
+def plot_with_crashes(jsonl_path: str, crashes: list):
+    # ... load data ...
+    
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(steps, spreads, 'b-', linewidth=0.5, label='Spread')
+    
+    # Highlight crash periods
+    for crash in crashes:
+        ax.axvspan(crash['start_step'], crash['end_step'], 
+                   alpha=0.3, color='red', label='Crash' if crash == crashes[0] else '')
+    
+    ax.set_xlabel('Step')
+    ax.set_ylabel('Spread')
+    ax.set_title('Spread with Crash Events Highlighted')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.savefig('crash_analysis.png', dpi=150)
+    plt.show()
+```
+
+## Comparative Scenario Analysis
+
+### Cross-Scenario Comparison
+
+```python
+def compare_scenarios(data_dir: str = "data"):
+    """Compare statistics across all scenarios."""
+    import os
+    
+    results = {}
+    
+    for filename in os.listdir(data_dir):
+        if filename.endswith('.jsonl'):
+            scenario = filename.split('_')[0]  # Extract scenario name
+            filepath = os.path.join(data_dir, filename)
+            
+            stats = analyze_price_distribution(filepath)
+            crashes = find_crash_events(filepath)
+            
+            results[scenario] = {
+                **stats,
+                "num_crashes": len(crashes),
+                "total_crash_duration": sum(c['duration'] for c in crashes)
+            }
+    
+    # Print comparison table
+    print("\n=== Scenario Comparison ===")
+    print(f"{'Scenario':<20} {'Spread Mean':<12} {'Spread Std':<12} {'Crashes':<10} {'Crash Steps':<12}")
+    print("-" * 70)
+    
+    for scenario, stats in results.items():
+        print(f"{scenario:<20} {stats['spread_mean']:<12.4f} {stats['spread_std']:<12.4f} "
+              f"{stats['num_crashes']:<10} {stats['total_crash_duration']:<12}")
+    
+    return results
+```
+
+## Key Insights to Extract
+
+For each scenario, answer these questions:
+
+### Market Structure
+- [ ] What is the typical spread?
+- [ ] How deep is the order book normally?
+- [ ] Is there a bid/ask imbalance bias?
+
+### Crash Characteristics
+- [ ] When do crashes occur? (Early, mid, late in simulation)
+- [ ] How long do crashes last?
+- [ ] What's the warning window before crashes?
+- [ ] How severe are the crashes? (Max spread, price drop)
+
+### Recovery Patterns
+- [ ] How long does recovery take?
+- [ ] Does the market overshoot during recovery?
+- [ ] Are there aftershock crashes?
+
+### Exploitable Patterns
+- [ ] Are there predictable volatility windows?
+- [ ] Is there mean reversion after price moves?
+- [ ] Are crashes preceded by detectable signals?
+
+## Analysis Checklist
+
+Before moving to strategy development:
+
+- [ ] **All scenarios analyzed**
+- [ ] **Crash events identified and catalogued**
+- [ ] **Regime transitions mapped**
+- [ ] **Baseline statistics computed**
+- [ ] **Visualizations generated**
+- [ ] **Comparative analysis complete**
+
+## Next Steps
+
+Once analysis is complete, proceed to **TRADING_STRATEGY** to:
+- Design algorithms that exploit discovered patterns
+- Implement crash detection in trading logic
+- Build regime-adaptive trading behavior

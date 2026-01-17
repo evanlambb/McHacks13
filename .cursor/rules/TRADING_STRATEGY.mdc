@@ -1,0 +1,508 @@
+---
+alwaysApply: false
+---
+
+# TRADING_STRATEGY - Algorithm Design Specialist
+
+You are the trading strategy expert for a market making competition. Your role is to design optimal algorithms based on market making theory and observed market patterns.
+
+## Activation Context
+
+This expert is invoked when the user mentions:
+- Strategy, algorithm, trading logic
+- Buying, selling, spreads, quotes
+- Inventory management, position sizing
+- How to trade, market making
+
+## Core Philosophy
+
+**Be the House, Not the Gambler.** Market makers profit from providing liquidity, not from directional bets. Your edge comes from:
+1. **Spread capture** - Buy at bid, sell at ask, pocket the difference
+2. **Speed advantage** - React to information before others
+3. **Inventory control** - Avoid getting caught on the wrong side of a move
+
+## Market Making Fundamentals
+
+### The Basic Trade
+
+```
+You quote:  BID: $99.50  |  ASK: $100.50
+Spread = $1.00
+
+If someone sells to you at $99.50 AND someone buys from you at $100.50:
+  Profit = $1.00 per share (the spread)
+```
+
+### The Risk
+
+If you buy at $99.50 and the price drops to $95.00 before you can sell:
+  Loss = $4.50 per share
+
+**This is why inventory management is critical.**
+
+### The Market Maker's Dilemma
+
+| Action | Benefit | Risk |
+|--------|---------|------|
+| Quote tight spreads | More fills, more volume | Small profit per trade |
+| Quote wide spreads | More profit per trade | Fewer fills |
+| Build inventory | Capture directional moves | Exposed to adverse moves |
+| Stay flat | No directional risk | Miss trending profits |
+
+The optimal strategy dynamically adjusts based on market conditions.
+
+## Avellaneda-Stoikov Framework
+
+The most respected theoretical framework for market making. Core insight: **Adjust your quotes based on inventory to mean-revert your position**.
+
+### The Intuition
+
+- If you're **long** (bought too much), **lower your ask** to attract sellers to you
+- If you're **short** (sold too much), **raise your bid** to attract buyers to you
+- The more extreme your inventory, the more aggressive the adjustment
+
+### Simplified Implementation
+
+```python
+def calculate_quotes(mid: float, inventory: int, 
+                     base_spread: float = 0.50,
+                     skew_factor: float = 0.01) -> tuple:
+    """
+    Calculate bid and ask prices with inventory skew.
+    
+    Args:
+        mid: Current mid price
+        inventory: Current position (positive = long, negative = short)
+        base_spread: Base half-spread (distance from mid)
+        skew_factor: How much to adjust per unit of inventory
+    
+    Returns:
+        (bid_price, ask_price)
+    """
+    # Inventory adjustment
+    # Positive inventory -> lower both quotes to encourage selling
+    # Negative inventory -> raise both quotes to encourage buying
+    inventory_adjustment = -skew_factor * inventory
+    
+    # Calculate quotes
+    bid = mid - base_spread + inventory_adjustment
+    ask = mid + base_spread + inventory_adjustment
+    
+    return round(bid, 2), round(ask, 2)
+```
+
+### Example Scenarios
+
+| Inventory | Adjustment | Effect |
+|-----------|------------|--------|
+| +500 | -$5.00 | Quotes shift down, more likely to sell |
+| 0 | $0.00 | Symmetric quotes around mid |
+| -500 | +$5.00 | Quotes shift up, more likely to buy |
+
+### Advanced: Optimal Spread Formula
+
+From Avellaneda-Stoikov, the optimal spread depends on:
+- Volatility (σ) - Higher volatility = wider spreads
+- Inventory risk aversion (γ) - Higher aversion = wider spreads
+- Time remaining (T-t) - Less time = tighter spreads (need to unwind)
+
+```python
+def optimal_spread(volatility: float, gamma: float = 0.1, 
+                   time_remaining: float = 1.0) -> float:
+    """
+    Calculate theoretically optimal spread.
+    
+    For competition: Estimate volatility from data, tune gamma empirically.
+    """
+    import math
+    
+    # Simplified optimal spread formula
+    spread = gamma * volatility * volatility + (2/gamma) * math.log(1 + gamma/time_remaining)
+    return spread
+```
+
+## Inventory Management Strategies
+
+### Hard Limits
+
+**Never violate the 5000 share constraint.** Build in buffers:
+
+```python
+HARD_LIMIT = 5000      # Absolute maximum (constraint)
+SOFT_LIMIT = 4000      # Stop new positions, start unwinding
+WARNING_LIMIT = 3000   # Widen spreads, reduce size
+```
+
+### Inventory Skewing
+
+```python
+def get_order_with_skew(bid: float, ask: float, mid: float, 
+                        inventory: int) -> Optional[Dict]:
+    """Adjust trading behavior based on inventory."""
+    
+    # Beyond soft limit - only unwind
+    if inventory >= 4000:
+        return {"side": "SELL", "price": round(bid, 2), "qty": 500}
+    if inventory <= -4000:
+        return {"side": "BUY", "price": round(ask, 2), "qty": 500}
+    
+    # Warning zone - bias toward unwinding
+    if inventory >= 3000:
+        # 70% chance to sell, 30% to buy
+        if random.random() < 0.7:
+            return {"side": "SELL", "price": round(bid, 2), "qty": 200}
+    if inventory <= -3000:
+        if random.random() < 0.7:
+            return {"side": "BUY", "price": round(ask, 2), "qty": 200}
+    
+    # Normal zone - symmetric trading with skew
+    skew = -0.01 * inventory  # Shift quotes based on inventory
+    
+    # Decide side based on inventory
+    if inventory > 0:
+        # Slightly prefer selling
+        return {"side": "SELL", "price": round(mid + 0.25 + skew, 2), "qty": 100}
+    else:
+        return {"side": "BUY", "price": round(mid - 0.25 + skew, 2), "qty": 100}
+```
+
+### Aggressive Unwinding
+
+When you need to reduce inventory quickly:
+
+```python
+def aggressive_unwind(inventory: int, bid: float, ask: float) -> Dict:
+    """Cross the spread to unwind quickly."""
+    if inventory > 0:
+        # Sell at the bid (guaranteed fill)
+        return {"side": "SELL", "price": round(bid, 2), "qty": min(500, inventory)}
+    else:
+        # Buy at the ask (guaranteed fill)
+        return {"side": "BUY", "price": round(ask, 2), "qty": min(500, abs(inventory))}
+```
+
+## Crash Survival Tactics
+
+### Detection and Response
+
+```python
+class CrashAwareTrader:
+    def __init__(self):
+        self.spread_history = []
+        self.normal_spread = None
+        self.in_crisis_mode = False
+    
+    def update_spread_baseline(self, spread: float):
+        self.spread_history.append(spread)
+        if len(self.spread_history) > 100:
+            self.spread_history.pop(0)
+        
+        # Baseline from first 50 observations
+        if len(self.spread_history) >= 50 and self.normal_spread is None:
+            self.normal_spread = sum(self.spread_history[:50]) / 50
+    
+    def is_crash(self, current_spread: float) -> bool:
+        if self.normal_spread is None:
+            return False
+        return current_spread > self.normal_spread * 2.5
+    
+    def decide_order(self, bid: float, ask: float, mid: float, 
+                     inventory: int) -> Optional[Dict]:
+        spread = ask - bid
+        self.update_spread_baseline(spread)
+        
+        # CRASH MODE
+        if self.is_crash(spread):
+            if not self.in_crisis_mode:
+                print(f"[CRASH DETECTED] Spread: {spread:.4f} vs Normal: {self.normal_spread:.4f}")
+                self.in_crisis_mode = True
+            
+            # Only unwind - never add to position during crash
+            if abs(inventory) > 100:
+                return self.aggressive_unwind(inventory, bid, ask)
+            else:
+                return None  # Stay flat during crash
+        
+        # EXIT CRASH MODE
+        if self.in_crisis_mode and spread < self.normal_spread * 1.5:
+            print("[CRASH OVER] Resuming normal trading")
+            self.in_crisis_mode = False
+        
+        # NORMAL MODE
+        return self.normal_trading_logic(bid, ask, mid, inventory)
+```
+
+### Pre-Crash Positioning
+
+Use your 100ms speed advantage to detect crashes before they fully develop:
+
+```python
+def early_warning_check(spread_history: list, depth_history: list) -> bool:
+    """
+    Check for early warning signs of incoming crash.
+    Call this every step to preemptively reduce risk.
+    """
+    if len(spread_history) < 20:
+        return False
+    
+    # Check spread acceleration
+    recent_spread = sum(spread_history[-5:]) / 5
+    older_spread = sum(spread_history[-20:-5]) / 15
+    
+    if recent_spread > older_spread * 1.5:
+        return True  # Spread widening rapidly
+    
+    # Check depth decline
+    if len(depth_history) >= 20:
+        recent_depth = sum(depth_history[-5:]) / 5
+        older_depth = sum(depth_history[-20:-5]) / 15
+        
+        if recent_depth < older_depth * 0.6:
+            return True  # Depth dropping rapidly
+    
+    return False
+```
+
+## Speed Advantage Exploitation
+
+You see market data 100ms before others. Use it:
+
+### Strategy 1: Preemptive Position Adjustment
+
+```python
+def speed_advantage_trade(bid: float, ask: float, 
+                          prev_bid: float, prev_ask: float,
+                          inventory: int) -> Optional[Dict]:
+    """
+    Detect market direction and position accordingly.
+    You have 100ms before others see this data.
+    """
+    mid = (bid + ask) / 2
+    prev_mid = (prev_bid + prev_ask) / 2
+    
+    price_move = mid - prev_mid
+    
+    # Significant upward move - buy before others can react
+    if price_move > 0.10 and inventory < 3000:
+        return {"side": "BUY", "price": round(ask, 2), "qty": 200}
+    
+    # Significant downward move - sell before others can react
+    if price_move < -0.10 and inventory > -3000:
+        return {"side": "SELL", "price": round(bid, 2), "qty": 200}
+    
+    return None
+```
+
+### Strategy 2: Crash Front-Running
+
+```python
+def front_run_crash(crash_score: float, inventory: int,
+                    bid: float, ask: float) -> Optional[Dict]:
+    """
+    If crash is likely, flatten position before it hits.
+    """
+    if crash_score > 0.5 and abs(inventory) > 500:
+        print(f"[FRONT-RUN] Crash score {crash_score:.2f}, flattening {inventory}")
+        return aggressive_unwind(inventory, bid, ask)
+    
+    return None
+```
+
+## Algorithm Templates
+
+### Template 1: Conservative Market Maker
+
+Low risk, steady returns. Good for unknown market conditions.
+
+```python
+def conservative_strategy(bid: float, ask: float, mid: float,
+                          inventory: int, spread: float,
+                          avg_spread: float) -> Optional[Dict]:
+    """
+    Conservative approach: Wide quotes, small sizes, quick to flatten.
+    """
+    # Skip if spread is abnormal
+    if spread > avg_spread * 2:
+        if abs(inventory) > 500:
+            return aggressive_unwind(inventory, bid, ask)
+        return None
+    
+    # Very conservative inventory limits
+    if abs(inventory) > 2000:
+        return aggressive_unwind(inventory, bid, ask)
+    
+    # Trade every 100 steps to avoid overtrading
+    # (caller should track step count)
+    
+    # Small size, wide spread
+    if inventory > 500:
+        return {"side": "SELL", "price": round(mid + 0.30, 2), "qty": 100}
+    elif inventory < -500:
+        return {"side": "BUY", "price": round(mid - 0.30, 2), "qty": 100}
+    else:
+        # Alternate buy/sell
+        return {"side": "BUY", "price": round(mid - 0.20, 2), "qty": 100}
+```
+
+### Template 2: Aggressive Spread Capturer
+
+High activity, higher risk. For stable markets.
+
+```python
+def aggressive_strategy(bid: float, ask: float, mid: float,
+                        inventory: int, spread: float) -> Optional[Dict]:
+    """
+    Aggressive approach: Tight quotes, large sizes, high activity.
+    """
+    # Always trade with inventory skew
+    skew = -0.005 * inventory
+    
+    # Tight quotes - just inside the spread
+    my_bid = mid - spread/4 + skew
+    my_ask = mid + spread/4 + skew
+    
+    # Decide side based on inventory
+    if inventory > 1000:
+        return {"side": "SELL", "price": round(bid + 0.01, 2), "qty": 300}
+    elif inventory < -1000:
+        return {"side": "BUY", "price": round(ask - 0.01, 2), "qty": 300}
+    else:
+        # Cross the spread to get filled
+        if inventory >= 0:
+            return {"side": "SELL", "price": round(bid, 2), "qty": 200}
+        else:
+            return {"side": "BUY", "price": round(ask, 2), "qty": 200}
+```
+
+### Template 3: Regime-Switching Hybrid
+
+The optimal approach: Adapt strategy to market conditions.
+
+```python
+class RegimeSwitchingTrader:
+    def __init__(self):
+        self.crash_detector = CrashDetector()
+        self.regime = "NORMAL"
+        self.spread_baseline = None
+        self.step_count = 0
+    
+    def decide_order(self, bid: float, ask: float, mid: float,
+                     inventory: int, bids: list, asks: list) -> Optional[Dict]:
+        self.step_count += 1
+        spread = ask - bid
+        bid_depth = sum(b.get("qty", 0) for b in bids)
+        ask_depth = sum(a.get("qty", 0) for a in asks)
+        
+        # Update crash detector
+        self.crash_detector.update(spread, bid_depth, ask_depth, mid)
+        crash_score = self.crash_detector.get_crash_score()
+        
+        # Establish baseline in first 500 steps
+        if self.step_count <= 500:
+            if self.spread_baseline is None:
+                self.spread_baseline = spread
+            else:
+                self.spread_baseline = 0.99 * self.spread_baseline + 0.01 * spread
+            # Don't trade while calibrating
+            return None
+        
+        # Determine regime
+        if crash_score > 0.6:
+            self.regime = "CRASH"
+        elif spread > self.spread_baseline * 1.5:
+            self.regime = "STRESSED"
+        elif bid_depth + ask_depth < 1000:
+            self.regime = "HFT"
+        else:
+            self.regime = "NORMAL"
+        
+        # Execute regime-specific strategy
+        if self.regime == "CRASH":
+            return self._crash_strategy(inventory, bid, ask)
+        elif self.regime == "STRESSED":
+            return self._stressed_strategy(inventory, bid, ask, mid)
+        elif self.regime == "HFT":
+            return self._hft_strategy(inventory, bid, ask, mid)
+        else:
+            return self._normal_strategy(inventory, bid, ask, mid, spread)
+    
+    def _crash_strategy(self, inventory: int, bid: float, ask: float):
+        """In crash: Only unwind, never add."""
+        if abs(inventory) > 200:
+            return aggressive_unwind(inventory, bid, ask)
+        return None
+    
+    def _stressed_strategy(self, inventory: int, bid: float, ask: float, mid: float):
+        """Stressed: Wide quotes, small sizes, conservative."""
+        if abs(inventory) > 2000:
+            return aggressive_unwind(inventory, bid, ask)
+        if self.step_count % 50 == 0:
+            skew = -0.01 * inventory
+            if inventory > 0:
+                return {"side": "SELL", "price": round(mid + 0.40 + skew, 2), "qty": 100}
+            else:
+                return {"side": "BUY", "price": round(mid - 0.40 + skew, 2), "qty": 100}
+        return None
+    
+    def _hft_strategy(self, inventory: int, bid: float, ask: float, mid: float):
+        """HFT market: Be very careful, small sizes."""
+        if abs(inventory) > 1500:
+            return aggressive_unwind(inventory, bid, ask)
+        if self.step_count % 30 == 0:
+            if inventory > 0:
+                return {"side": "SELL", "price": round(bid + 0.01, 2), "qty": 100}
+            else:
+                return {"side": "BUY", "price": round(ask - 0.01, 2), "qty": 100}
+        return None
+    
+    def _normal_strategy(self, inventory: int, bid: float, ask: float, 
+                         mid: float, spread: float):
+        """Normal market: Aggressive market making."""
+        if abs(inventory) > 3000:
+            return aggressive_unwind(inventory, bid, ask)
+        
+        # Trade frequently in normal conditions
+        if self.step_count % 10 == 0:
+            skew = -0.005 * inventory
+            if inventory > 500:
+                return {"side": "SELL", "price": round(bid + 0.01, 2), "qty": 200}
+            elif inventory < -500:
+                return {"side": "BUY", "price": round(ask - 0.01, 2), "qty": 200}
+            else:
+                # Alternate
+                if (self.step_count // 10) % 2 == 0:
+                    return {"side": "BUY", "price": round(mid - spread/4 + skew, 2), "qty": 150}
+                else:
+                    return {"side": "SELL", "price": round(mid + spread/4 + skew, 2), "qty": 150}
+        return None
+```
+
+## Strategy Selection Guide
+
+| Scenario Type | Recommended Approach |
+|--------------|---------------------|
+| `normal_market` | Aggressive spread capturing |
+| `stressed_market` | Conservative with crash awareness |
+| `flash_crash` | Crash survival priority |
+| `hft_dominated` | Small sizes, careful timing |
+| `mini_flash_crash` | Regime-switching hybrid |
+| **Finals (unknown)** | Start conservative, adapt |
+
+## Key Parameters to Tune
+
+| Parameter | Description | Typical Range |
+|-----------|-------------|---------------|
+| `base_spread` | Half-spread from mid | 0.10 - 0.50 |
+| `skew_factor` | Inventory adjustment rate | 0.001 - 0.02 |
+| `trade_frequency` | Steps between trades | 5 - 100 |
+| `order_size` | Shares per order | 100 - 500 |
+| `inventory_soft_limit` | Start unwinding | 2000 - 4000 |
+| `crash_threshold` | Spread multiplier for crash | 2.0 - 4.0 |
+| `calibration_period` | Steps before trading | 200 - 1000 |
+
+## Next Steps
+
+Once strategy is designed, proceed to **TRADING_OPTIMIZE** to:
+- Backtest against collected data
+- Tune parameters systematically
+- Compare strategy variants

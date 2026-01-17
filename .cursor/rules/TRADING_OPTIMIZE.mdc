@@ -1,0 +1,629 @@
+---
+alwaysApply: false
+---
+# TRADING_OPTIMIZE - Backtesting & Tuning Specialist
+
+You are the optimization expert for a market making competition. Your role is to systematically test strategies and tune parameters for maximum performance.
+
+## Activation Context
+
+This expert is invoked when the user mentions:
+- Backtesting, testing strategies
+- Optimization, tuning parameters
+- Comparing algorithms, which is better
+- Performance metrics, grid search
+
+## Core Philosophy
+
+**Measure, Don't Guess.** Every parameter choice should be backed by data. The deterministic nature of this simulation means we can find optimal parameters through exhaustive search.
+
+## Performance Metrics
+
+### Primary Metrics (Competition Scoring)
+
+| Metric | Formula | Weight |
+|--------|---------|--------|
+| **Profitability** | Final PnL | High |
+| **Notional Traded** | Sum of (price * qty) for all fills | High |
+| **Inventory Management** | Max |inventory| during run | High |
+| **Speed** | Avg decision latency | Medium |
+
+### Secondary Metrics (Diagnostic)
+
+| Metric | Formula | Purpose |
+|--------|---------|---------|
+| **Sharpe Ratio** | mean(returns) / std(returns) | Risk-adjusted return |
+| **Max Drawdown** | Largest peak-to-trough PnL drop | Worst-case loss |
+| **Win Rate** | Profitable trades / Total trades | Consistency |
+| **Inventory Volatility** | std(inventory) | Position stability |
+| **Survival** | Did we stay under 5000 inventory? | Constraint compliance |
+
+### Metric Calculator
+
+```python
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Dict
+
+@dataclass
+class BacktestResult:
+    final_pnl: float
+    notional_traded: float
+    max_inventory: int
+    max_drawdown: float
+    sharpe_ratio: float
+    num_trades: int
+    win_rate: float
+    inventory_volatility: float
+    survived: bool
+    
+    def score(self, weights: Dict[str, float] = None) -> float:
+        """Calculate weighted composite score."""
+        if weights is None:
+            weights = {
+                "pnl": 0.35,
+                "notional": 0.25,
+                "inventory": 0.25,
+                "survival": 0.15
+            }
+        
+        # Normalize metrics (these need calibration based on your data)
+        pnl_score = max(0, min(1, (self.final_pnl + 10000) / 20000))
+        notional_score = min(1, self.notional_traded / 1000000)
+        inventory_score = max(0, 1 - self.max_inventory / 5000)
+        survival_score = 1.0 if self.survived else 0.0
+        
+        return (weights["pnl"] * pnl_score +
+                weights["notional"] * notional_score +
+                weights["inventory"] * inventory_score +
+                weights["survival"] * survival_score)
+
+
+def calculate_metrics(pnl_history: List[float], 
+                      inventory_history: List[int],
+                      trades: List[Dict]) -> BacktestResult:
+    """Calculate all metrics from backtest run."""
+    
+    # PnL metrics
+    final_pnl = pnl_history[-1] if pnl_history else 0
+    
+    # Drawdown
+    peak = pnl_history[0]
+    max_drawdown = 0
+    for pnl in pnl_history:
+        if pnl > peak:
+            peak = pnl
+        drawdown = peak - pnl
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+    
+    # Sharpe (daily returns approximation)
+    if len(pnl_history) > 1:
+        returns = np.diff(pnl_history)
+        sharpe = np.mean(returns) / np.std(returns) if np.std(returns) > 0 else 0
+    else:
+        sharpe = 0
+    
+    # Trade metrics
+    notional = sum(t["price"] * t["qty"] for t in trades)
+    profitable_trades = sum(1 for t in trades if t.get("profit", 0) > 0)
+    win_rate = profitable_trades / len(trades) if trades else 0
+    
+    # Inventory metrics
+    max_inv = max(abs(i) for i in inventory_history) if inventory_history else 0
+    inv_volatility = np.std(inventory_history) if inventory_history else 0
+    survived = max_inv < 5000
+    
+    return BacktestResult(
+        final_pnl=final_pnl,
+        notional_traded=notional,
+        max_inventory=max_inv,
+        max_drawdown=max_drawdown,
+        sharpe_ratio=sharpe,
+        num_trades=len(trades),
+        win_rate=win_rate,
+        inventory_volatility=inv_volatility,
+        survived=survived
+    )
+```
+
+## Backtesting Framework
+
+### Architecture
+
+```
+Collected Market Data (JSONL)
+         │
+         ▼
+    ┌─────────────┐
+    │  Backtester │ ← Strategy + Parameters
+    └─────────────┘
+         │
+         ▼
+    Simulated Trades
+         │
+         ▼
+    ┌─────────────┐
+    │   Metrics   │
+    └─────────────┘
+         │
+         ▼
+    BacktestResult
+```
+
+### Backtester Implementation
+
+```python
+import json
+from typing import Callable, Optional, Dict, List
+
+class Backtester:
+    """
+    Replay collected market data and simulate strategy execution.
+    """
+    
+    def __init__(self, jsonl_path: str):
+        self.data = self._load_data(jsonl_path)
+        print(f"Loaded {len(self.data)} steps from {jsonl_path}")
+    
+    def _load_data(self, path: str) -> List[Dict]:
+        data = []
+        with open(path, 'r') as f:
+            for line in f:
+                data.append(json.loads(line))
+        return data
+    
+    def run(self, strategy: Callable, params: Dict = None) -> BacktestResult:
+        """
+        Run strategy against historical data.
+        
+        Args:
+            strategy: Function(step_data, state, params) -> Optional[order]
+            params: Strategy parameters
+        
+        Returns:
+            BacktestResult with all metrics
+        """
+        # Initialize state
+        state = {
+            "inventory": 0,
+            "cash_flow": 0.0,
+            "pnl": 0.0,
+            "step": 0
+        }
+        
+        pnl_history = []
+        inventory_history = []
+        trades = []
+        
+        for step_data in self.data:
+            state["step"] = step_data["step"]
+            
+            # Get strategy decision
+            order = strategy(step_data, state, params or {})
+            
+            # Simulate execution
+            if order:
+                fill = self._simulate_fill(order, step_data)
+                if fill:
+                    self._update_state(state, fill, step_data)
+                    trades.append(fill)
+            
+            # Update PnL
+            mid = step_data["market"]["mid"]
+            state["pnl"] = state["cash_flow"] + state["inventory"] * mid
+            
+            # Record history
+            pnl_history.append(state["pnl"])
+            inventory_history.append(state["inventory"])
+        
+        return calculate_metrics(pnl_history, inventory_history, trades)
+    
+    def _simulate_fill(self, order: Dict, step_data: Dict) -> Optional[Dict]:
+        """
+        Simulate order fill based on market data.
+        
+        Simplified logic:
+        - If BUY price >= ask, fill at ask
+        - If SELL price <= bid, fill at bid
+        """
+        bid = step_data["market"]["bid"]
+        ask = step_data["market"]["ask"]
+        
+        if order["side"] == "BUY" and order["price"] >= ask:
+            return {
+                "side": "BUY",
+                "price": ask,
+                "qty": order["qty"],
+                "step": step_data["step"]
+            }
+        elif order["side"] == "SELL" and order["price"] <= bid:
+            return {
+                "side": "SELL",
+                "price": bid,
+                "qty": order["qty"],
+                "step": step_data["step"]
+            }
+        
+        return None  # Order didn't fill
+    
+    def _update_state(self, state: Dict, fill: Dict, step_data: Dict):
+        """Update state after a fill."""
+        if fill["side"] == "BUY":
+            state["inventory"] += fill["qty"]
+            state["cash_flow"] -= fill["qty"] * fill["price"]
+        else:
+            state["inventory"] -= fill["qty"]
+            state["cash_flow"] += fill["qty"] * fill["price"]
+```
+
+### Example Strategy Function
+
+```python
+def my_strategy(step_data: Dict, state: Dict, params: Dict) -> Optional[Dict]:
+    """
+    Example strategy function for backtesting.
+    
+    Args:
+        step_data: Market data for current step
+        state: Current trading state (inventory, cash_flow, pnl)
+        params: Strategy parameters
+    """
+    bid = step_data["market"]["bid"]
+    ask = step_data["market"]["ask"]
+    mid = step_data["market"]["mid"]
+    spread = step_data["market"]["spread"]
+    inventory = state["inventory"]
+    step = state["step"]
+    
+    # Parameters with defaults
+    trade_freq = params.get("trade_freq", 50)
+    skew_factor = params.get("skew_factor", 0.01)
+    inventory_limit = params.get("inventory_limit", 3000)
+    base_offset = params.get("base_offset", 0.20)
+    
+    # Unwind if over limit
+    if inventory > inventory_limit:
+        return {"side": "SELL", "price": bid, "qty": 200}
+    if inventory < -inventory_limit:
+        return {"side": "BUY", "price": ask, "qty": 200}
+    
+    # Trade at specified frequency
+    if step % trade_freq != 0:
+        return None
+    
+    # Inventory skew
+    skew = -skew_factor * inventory
+    
+    # Alternate buy/sell
+    if (step // trade_freq) % 2 == 0:
+        return {"side": "BUY", "price": mid - base_offset + skew, "qty": 100}
+    else:
+        return {"side": "SELL", "price": mid + base_offset + skew, "qty": 100}
+```
+
+## Parameter Optimization
+
+### Grid Search
+
+Exhaustively test all parameter combinations:
+
+```python
+from itertools import product
+from typing import List, Tuple
+import pandas as pd
+
+def grid_search(backtester: Backtester, 
+                strategy: Callable,
+                param_grid: Dict[str, List]) -> pd.DataFrame:
+    """
+    Grid search over parameter space.
+    
+    Args:
+        backtester: Backtester instance
+        strategy: Strategy function
+        param_grid: Dict of param_name -> list of values
+    
+    Returns:
+        DataFrame with all results
+    """
+    # Generate all combinations
+    param_names = list(param_grid.keys())
+    param_values = list(param_grid.values())
+    combinations = list(product(*param_values))
+    
+    print(f"Testing {len(combinations)} parameter combinations...")
+    
+    results = []
+    for i, combo in enumerate(combinations):
+        params = dict(zip(param_names, combo))
+        
+        result = backtester.run(strategy, params)
+        
+        results.append({
+            **params,
+            "final_pnl": result.final_pnl,
+            "notional": result.notional_traded,
+            "max_inventory": result.max_inventory,
+            "sharpe": result.sharpe_ratio,
+            "max_drawdown": result.max_drawdown,
+            "num_trades": result.num_trades,
+            "survived": result.survived,
+            "score": result.score()
+        })
+        
+        if (i + 1) % 10 == 0:
+            print(f"  Completed {i + 1}/{len(combinations)}")
+    
+    df = pd.DataFrame(results)
+    df = df.sort_values("score", ascending=False)
+    
+    print(f"\n=== Top 5 Parameter Combinations ===")
+    print(df.head(5).to_string())
+    
+    return df
+
+
+# Example usage
+param_grid = {
+    "trade_freq": [10, 25, 50, 100],
+    "skew_factor": [0.005, 0.01, 0.02],
+    "inventory_limit": [2000, 3000, 4000],
+    "base_offset": [0.10, 0.20, 0.30, 0.50]
+}
+
+# results = grid_search(backtester, my_strategy, param_grid)
+```
+
+### Bayesian Optimization (Advanced)
+
+For faster convergence on large parameter spaces:
+
+```python
+from scipy.optimize import minimize
+from scipy.stats import uniform
+
+def bayesian_optimize(backtester: Backtester,
+                      strategy: Callable,
+                      param_bounds: Dict[str, Tuple[float, float]],
+                      n_iterations: int = 50) -> Dict:
+    """
+    Bayesian optimization for continuous parameters.
+    """
+    param_names = list(param_bounds.keys())
+    bounds = [param_bounds[name] for name in param_names]
+    
+    best_params = None
+    best_score = -float('inf')
+    
+    def objective(x):
+        params = dict(zip(param_names, x))
+        result = backtester.run(strategy, params)
+        return -result.score()  # Minimize negative score
+    
+    # Random search with local optimization
+    for i in range(n_iterations):
+        # Random starting point
+        x0 = [uniform(b[0], b[1] - b[0]).rvs() for b in bounds]
+        
+        # Local optimization
+        res = minimize(objective, x0, bounds=bounds, method='L-BFGS-B')
+        
+        if -res.fun > best_score:
+            best_score = -res.fun
+            best_params = dict(zip(param_names, res.x))
+            print(f"Iteration {i+1}: New best score = {best_score:.4f}")
+    
+    return best_params
+```
+
+## Cross-Scenario Validation
+
+### The Overfitting Problem
+
+Since simulations are deterministic, there's a risk of overfitting to specific scenarios. Mitigate this:
+
+```python
+def cross_validate(strategy: Callable, 
+                   scenario_files: List[str],
+                   params: Dict) -> Dict:
+    """
+    Test parameters across multiple scenarios.
+    """
+    results = {}
+    
+    for filepath in scenario_files:
+        scenario_name = filepath.split('/')[-1].split('_')[0]
+        backtester = Backtester(filepath)
+        result = backtester.run(strategy, params)
+        results[scenario_name] = result
+        
+        print(f"{scenario_name}: PnL={result.final_pnl:.2f}, "
+              f"Notional={result.notional_traded:.0f}, "
+              f"MaxInv={result.max_inventory}")
+    
+    # Aggregate metrics
+    avg_pnl = np.mean([r.final_pnl for r in results.values()])
+    avg_score = np.mean([r.score() for r in results.values()])
+    min_score = min(r.score() for r in results.values())
+    all_survived = all(r.survived for r in results.values())
+    
+    print(f"\n=== Cross-Scenario Summary ===")
+    print(f"Avg PnL: {avg_pnl:.2f}")
+    print(f"Avg Score: {avg_score:.4f}")
+    print(f"Min Score: {min_score:.4f}")
+    print(f"All Survived: {all_survived}")
+    
+    return {
+        "per_scenario": results,
+        "avg_pnl": avg_pnl,
+        "avg_score": avg_score,
+        "min_score": min_score,
+        "all_survived": all_survived
+    }
+```
+
+### Scenario-Specific Parameters
+
+Some parameters may need to vary by scenario:
+
+```python
+SCENARIO_PARAMS = {
+    "normal_market": {
+        "trade_freq": 10,
+        "skew_factor": 0.005,
+        "inventory_limit": 3500,
+        "base_offset": 0.15
+    },
+    "stressed_market": {
+        "trade_freq": 50,
+        "skew_factor": 0.01,
+        "inventory_limit": 2500,
+        "base_offset": 0.30
+    },
+    "flash_crash": {
+        "trade_freq": 100,
+        "skew_factor": 0.02,
+        "inventory_limit": 2000,
+        "base_offset": 0.50
+    },
+    "hft_dominated": {
+        "trade_freq": 25,
+        "skew_factor": 0.008,
+        "inventory_limit": 1500,
+        "base_offset": 0.10
+    },
+    "mini_flash_crash": {
+        "trade_freq": 30,
+        "skew_factor": 0.015,
+        "inventory_limit": 2500,
+        "base_offset": 0.25
+    }
+}
+```
+
+## A/B Testing Strategies
+
+### Compare Two Strategies
+
+```python
+def compare_strategies(backtester: Backtester,
+                       strategy_a: Callable, params_a: Dict,
+                       strategy_b: Callable, params_b: Dict,
+                       strategy_a_name: str = "A",
+                       strategy_b_name: str = "B"):
+    """Compare two strategies head-to-head."""
+    
+    result_a = backtester.run(strategy_a, params_a)
+    result_b = backtester.run(strategy_b, params_b)
+    
+    print(f"\n=== Strategy Comparison ===")
+    print(f"{'Metric':<20} {strategy_a_name:>15} {strategy_b_name:>15} {'Winner':>10}")
+    print("-" * 60)
+    
+    metrics = [
+        ("Final PnL", result_a.final_pnl, result_b.final_pnl, "higher"),
+        ("Notional Traded", result_a.notional_traded, result_b.notional_traded, "higher"),
+        ("Max Inventory", result_a.max_inventory, result_b.max_inventory, "lower"),
+        ("Max Drawdown", result_a.max_drawdown, result_b.max_drawdown, "lower"),
+        ("Sharpe Ratio", result_a.sharpe_ratio, result_b.sharpe_ratio, "higher"),
+        ("Num Trades", result_a.num_trades, result_b.num_trades, "higher"),
+        ("Composite Score", result_a.score(), result_b.score(), "higher"),
+    ]
+    
+    wins_a, wins_b = 0, 0
+    for name, val_a, val_b, better in metrics:
+        if better == "higher":
+            winner = strategy_a_name if val_a > val_b else strategy_b_name
+        else:
+            winner = strategy_a_name if val_a < val_b else strategy_b_name
+        
+        if winner == strategy_a_name:
+            wins_a += 1
+        else:
+            wins_b += 1
+        
+        print(f"{name:<20} {val_a:>15.2f} {val_b:>15.2f} {winner:>10}")
+    
+    print("-" * 60)
+    print(f"{'Metrics Won':<20} {wins_a:>15} {wins_b:>15}")
+    
+    return result_a, result_b
+```
+
+## Optimization Workflow
+
+### Recommended Process
+
+1. **Baseline Measurement**
+   - Run default strategy with default parameters
+   - Record baseline metrics for comparison
+
+2. **Coarse Grid Search**
+   - Test wide parameter ranges with large steps
+   - Identify promising regions
+
+3. **Fine Grid Search**
+   - Narrow down on promising regions
+   - Use finer parameter steps
+
+4. **Cross-Scenario Validation**
+   - Test best parameters across all scenarios
+   - Check for overfitting
+
+5. **Sensitivity Analysis**
+   - How much does performance degrade with small parameter changes?
+   - Robust parameters are preferred
+
+6. **Final Selection**
+   - Choose parameters that maximize min-score across scenarios
+   - Prefer robust parameters over maximum average
+
+### Parameter Sensitivity Check
+
+```python
+def sensitivity_analysis(backtester: Backtester,
+                         strategy: Callable,
+                         base_params: Dict,
+                         param_name: str,
+                         variations: List[float]) -> pd.DataFrame:
+    """
+    Analyze how sensitive performance is to a single parameter.
+    """
+    results = []
+    
+    for var in variations:
+        params = base_params.copy()
+        params[param_name] = base_params[param_name] * var
+        
+        result = backtester.run(strategy, params)
+        results.append({
+            "variation": var,
+            "value": params[param_name],
+            "pnl": result.final_pnl,
+            "score": result.score()
+        })
+    
+    df = pd.DataFrame(results)
+    
+    print(f"\n=== Sensitivity: {param_name} ===")
+    print(df.to_string())
+    
+    return df
+```
+
+## Checklist Before Finals
+
+- [ ] **Parameters optimized for each known scenario**
+- [ ] **Cross-scenario validation passed**
+- [ ] **Survival guaranteed (never hit 5000 inventory)**
+- [ ] **Sensitivity analysis shows robust parameters**
+- [ ] **Best parameters documented and saved**
+- [ ] **Fallback parameters prepared (conservative)**
+
+## Next Steps
+
+Once optimization is complete, proceed to **TRADING_EXECUTE** for:
+- Pre-flight checklist
+- Risk management setup
+- Finals deployment strategy
