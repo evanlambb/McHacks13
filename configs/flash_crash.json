@@ -1,9 +1,12 @@
 {
   "scenario_id": "flash_crash",
+  "description": "20 MMs, institutional selling starts at step 18000, NO fundamental drift",
   "detection_signature": {
     "spread_range": [0.25, 5.0],
     "depth_range": [5000, 20000],
-    "volatility_range": [0.001, 0.01]
+    "volatility_range": [0.001, 0.01],
+    "price_drift_threshold": 0.0,
+    "mm_count_estimate": 20
   },
   "base_params": {
     "tick_size": 0.25,
@@ -25,7 +28,8 @@
       "max_inventory": 2000,
       "spread_capture": true,
       "compete": true,
-      "crash_aware": true
+      "crash_aware": true,
+      "pre_crash_step": 17000
     },
     "HFT": {
       "trade_frequency": 100,

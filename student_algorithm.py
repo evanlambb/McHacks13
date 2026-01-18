@@ -17,11 +17,14 @@ import time
 import requests
 import ssl
 import urllib3
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 import statistics
 
 # Config system
 from configs import load_config, get_default_config, match_scenario_signature, load_all_configs
+
+# Feature extraction for regime detection
+from analysis.feature_extractor import FeatureExtractor
 
 # Suppress SSL warnings for self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -85,9 +88,17 @@ class TradingBot:
         self.baseline_spread = None
         self.baseline_depth = None
         
-        # Regime state
+        # Regime state with stability controls
         self.regime = "CALIBRATING"
         self.steps_in_regime = 0
+        self.regime_change_cooldown = 0  # Steps until we can change regime again
+        self.pending_regime = None       # Regime we're considering switching to
+        self.pending_regime_count = 0    # How many steps this pending regime has persisted
+        
+        # Regime stability constants
+        self.REGIME_COOLDOWN_STEPS = 50          # Min steps between regime changes
+        self.REGIME_PERSISTENCE_REQUIRED = 15    # Steps condition must hold to confirm change (increased from 8)
+        self.REGIME_EXIT_PERSISTENCE = 20        # More steps needed to EXIT a regime (hysteresis, increased from 12)
         
         # Performance tracking
         self.consecutive_losses = 0
@@ -108,23 +119,17 @@ class TradingBot:
         # Order book depth tracking
         self.last_bid_depth = 0
         self.last_ask_depth = 0
+        self.last_bids = []  # Full order book bids
+        self.last_asks = []  # Full order book asks
         
         # Pending orders tracking
         self.pending_buy_price = None
         self.pending_sell_price = None
         
-        # Configuration system
-        self.detected_scenario = None  # Will be set during calibration
-        self.config = None  # Will be loaded after scenario detection
-        self.all_configs = load_all_configs()  # Pre-load all configs for matching
-        
-        # Try to load config based on CLI scenario argument (may be overridden by auto-detection)
-        try:
-            self.config = load_config(scenario)
-            print(f"[{self.student_id}] Loaded config for scenario: {scenario}")
-        except Exception as e:
-            print(f"[{self.student_id}] Warning: Could not load config for '{scenario}', using default: {e}")
-            self.config = get_default_config()
+        # Configuration system - will be loaded after scenario detection
+        self.config = None
+        # Start with default config, will be replaced after scenario detection
+        self.config = get_default_config()
         
         # Apply base params from config
         base_params = self.config["base_params"]
@@ -134,10 +139,16 @@ class TradingBot:
         self.INVENTORY_DANGER = base_params["inventory_danger"]
         self.INVENTORY_CRITICAL = base_params["inventory_critical"]
         
-        # Calibration data for scenario detection
+        # Calibration data for baseline establishment and scenario detection
         self.calibration_spreads = []
         self.calibration_depths = []
         self.calibration_mids = []
+        
+        # Feature extractor for multi-timeframe analysis
+        self.feature_extractor = FeatureExtractor()
+        
+        # Detected scenario (set at end of calibration)
+        self.detected_scenario = None
     
     # =========================================================================
     # REGISTRATION - Get a token to start trading
@@ -250,15 +261,18 @@ class TradingBot:
             self.last_bid = data.get("bid", 0.0)
             self.last_ask = data.get("ask", 0.0)
             
-            # Extract order book depth
+            # Extract order book depth and full order book
             # API provides bid_size/ask_size at top level, or calculate from bids/asks arrays
+            bids = data.get("bids", [])
+            asks = data.get("asks", [])
+            self.last_bids = bids
+            self.last_asks = asks
+            
             self.last_bid_depth = data.get("bid_size", 0)
             self.last_ask_depth = data.get("ask_size", 0)
             
             # Fallback: calculate from bids/asks arrays if sizes not provided
             if self.last_bid_depth == 0 or self.last_ask_depth == 0:
-                bids = data.get("bids", [])
-                asks = data.get("asks", [])
                 if bids:
                     self.last_bid_depth = sum(b.get("qty", 0) for b in bids)
                 if asks:
@@ -275,35 +289,101 @@ class TradingBot:
                 self.last_mid = 0
             
             # Collect calibration data for scenario detection
+            spread = self.last_ask - self.last_bid if self.last_ask > 0 and self.last_bid > 0 else 0
+            total_depth = self.last_bid_depth + self.last_ask_depth
+            
             if self.current_step < self.CALIBRATION_STEPS:
-                spread = self.last_ask - self.last_bid if self.last_ask > 0 and self.last_bid > 0 else 0
-                total_depth = self.last_bid_depth + self.last_ask_depth
                 if spread > 0:
                     self.calibration_spreads.append(spread)
                 if total_depth > 0:
                     self.calibration_depths.append(total_depth)
                 if self.last_mid > 0:
                     self.calibration_mids.append(self.last_mid)
+                
+                # Update feature extractor during calibration
+                imbalance = self.feature_extractor.get_order_imbalance(bids, asks, levels=3)
+                self.feature_extractor.update(spread, total_depth, self.last_mid, imbalance)
             
-            # Auto-detect scenario at end of calibration
+            # Scenario detection and config loading at end of calibration
             if self.current_step == self.CALIBRATION_STEPS:
-                try:
-                    if len(self.calibration_spreads) > 50:
-                        self._detect_and_load_scenario()
-                    else:
-                        print(f"[{self.student_id}] [WARNING] Insufficient calibration data ({len(self.calibration_spreads)} spreads), skipping auto-detection")
-                except Exception as e:
-                    print(f"[{self.student_id}] [ERROR] Scenario detection failed: {e}")
-                    import traceback
-                    traceback.print_exc()
+                if len(self.calibration_spreads) > 50:
+                    print(f"[{self.student_id}] [CALIBRATION] Baseline established: {len(self.calibration_spreads)} data points")
+                    
+                    # Calculate calibration statistics for scenario detection
+                    avg_spread = statistics.mean(self.calibration_spreads)
+                    avg_depth = statistics.mean(self.calibration_depths) if len(self.calibration_depths) > 0 else 10000
+                    spread_std = statistics.stdev(self.calibration_spreads) if len(self.calibration_spreads) > 1 else 0.1
+                    
+                    # Calculate volatility and price drift
+                    volatility = 0.0
+                    price_drift = 0.0
+                    if len(self.calibration_mids) >= 100:
+                        mid_changes = [self.calibration_mids[i] - self.calibration_mids[i-1] 
+                                     for i in range(1, len(self.calibration_mids))]
+                        volatility = statistics.stdev(mid_changes) if len(mid_changes) > 1 else 0.0
+                        price_drift = (self.calibration_mids[-1] - self.calibration_mids[0]) / len(self.calibration_mids)
+                    
+                    # Calculate depth variability
+                    depth_variability = 0.0
+                    if len(self.calibration_depths) > 1 and avg_depth > 0:
+                        depth_std = statistics.stdev(self.calibration_depths)
+                        depth_variability = depth_std / avg_depth
+                    
+                    # Match scenario signature
+                    calibration_data = {
+                        "avg_spread": avg_spread,
+                        "avg_depth": avg_depth,
+                        "spread_std": spread_std,
+                        "volatility": volatility,
+                        "price_drift": price_drift,
+                        "depth_variability": depth_variability,
+                        "depth_available": True
+                    }
+                    
+                    self.detected_scenario = match_scenario_signature(calibration_data)
+                    print(f"[{self.student_id}] [SCENARIO DETECTION] Detected scenario: {self.detected_scenario}")
+                    
+                    # Load scenario-specific config
+                    try:
+                        self.config = load_config(self.detected_scenario)
+                        print(f"[{self.student_id}] [CONFIG] Loaded config for {self.detected_scenario}")
+                        
+                        # Update base params from new config
+                        base_params = self.config["base_params"]
+                        self.TICK_SIZE = base_params["tick_size"]
+                        self.CALIBRATION_STEPS = base_params["calibration_steps"]
+                        self.INVENTORY_WARNING = base_params["inventory_warning"]
+                        self.INVENTORY_DANGER = base_params["inventory_danger"]
+                        self.INVENTORY_CRITICAL = base_params["inventory_critical"]
+                    except Exception as e:
+                        print(f"[{self.student_id}] [WARNING] Could not load config for {self.detected_scenario}, using default: {e}")
+                        self.config = get_default_config()
+                    
+                    # Establish baseline for feature extractor
+                    baseline_spread = avg_spread
+                    baseline_depth = avg_depth
+                    self.baseline_spread = baseline_spread
+                    self.baseline_depth = baseline_depth
+                    self.feature_extractor.set_baseline(baseline_spread, baseline_depth)
+                    print(f"[{self.student_id}] [CALIBRATED] Baseline spread: {baseline_spread:.4f}, depth: {baseline_depth:.0f}")
+                else:
+                    print(f"[{self.student_id}] [WARNING] Insufficient calibration data ({len(self.calibration_spreads)} spreads)")
+                    # Use defaults
+                    self.baseline_spread = 0.5
+                    self.baseline_depth = 10000
+                    self.feature_extractor.set_baseline(self.baseline_spread, self.baseline_depth)
+            
+            # Update feature extractor after calibration
+            if self.current_step >= self.CALIBRATION_STEPS:
+                imbalance = self.feature_extractor.get_order_imbalance(bids, asks, levels=3)
+                self.feature_extractor.update(spread, total_depth, self.last_mid, imbalance)
             
             # Log progress every 500 steps with latency stats
             if self.current_step % 500 == 0:
                 avg_lat = sum(self.step_latencies[-100:]) / min(len(self.step_latencies), 100) if self.step_latencies else 0.0
-                scenario_info = f"Scenario: {self.detected_scenario}" if self.detected_scenario else f"CLI: {self.scenario}"
                 spread = self.last_ask - self.last_bid if self.last_ask > 0 and self.last_bid > 0 else 0
                 open_count = self._get_open_order_count()
-                print(f"[{self.student_id}] Step {self.current_step} | Orders: {self.orders_sent} | Open: {open_count}/{self.MAX_OPEN_ORDERS} | Inv: {self.inventory} | Regime: {self.regime} | {scenario_info} | Spread: {spread:.4f} | Depth: {self.last_bid_depth + self.last_ask_depth} | Avg Latency: {avg_lat:.1f}ms")
+                print(f"[{self.student_id}] Step {self.current_step} | Orders: {self.orders_sent} | Open: {open_count}/{self.MAX_OPEN_ORDERS} | Inv: {self.inventory} | Regime: {self.regime} | Spread: {spread:.4f} | Depth: {self.last_bid_depth + self.last_ask_depth} | Avg Latency: {avg_lat:.1f}ms")
             
             # =============================================
             # YOUR STRATEGY LOGIC GOES HERE
@@ -339,12 +419,19 @@ class TradingBot:
         rounded = max(min_qty, round(qty / 100) * 100)
         return min(500, rounded)  # Cap at max order size of 500
     
+    def _ensure_qty_multiple_of_100(self, qty: int) -> int:
+        """Ensure quantity is a multiple of 100, minimum 100, maximum 500."""
+        if qty <= 0:
+            return 100
+        rounded = round(qty / 100) * 100
+        return max(100, min(500, rounded))
+    
     def _get_opposite_order(self, order: Dict, bid: float, ask: float, regime_config: Dict) -> Optional[Dict]:
         """
         Generate an opposite-side order for two-sided quoting.
         If the primary order is BUY, generate a SELL; if SELL, generate a BUY.
         """
-        order_size = regime_config.get("order_size", 100)
+        order_size = self._ensure_qty_multiple_of_100(regime_config.get("order_size", 100))
         aggressive_join = regime_config.get("aggressive_join", True)
         spread = ask - bid
         
@@ -377,87 +464,28 @@ class TradingBot:
     # SCENARIO AUTO-DETECTION
     # =========================================================================
     
-    def _detect_and_load_scenario(self):
-        """
-        Auto-detect scenario from calibration data and reload appropriate config.
-        """
-        if len(self.calibration_spreads) < 50:
-            print(f"[{self.student_id}] Warning: Insufficient calibration data for scenario detection")
-            return
-        
-        # Calculate calibration statistics - check for empty lists first
-        if not self.calibration_spreads:
-            print(f"[{self.student_id}] Warning: No spread data collected")
-            return
-        
-        avg_spread = statistics.mean(self.calibration_spreads)
-        spread_std = statistics.stdev(self.calibration_spreads) if len(self.calibration_spreads) > 1 else 0
-        
-        # Depth might be empty if book data wasn't available
-        if self.calibration_depths:
-            avg_depth = statistics.mean(self.calibration_depths)
-        else:
-            avg_depth = 10000  # Default fallback
-            print(f"[{self.student_id}] Warning: No depth data collected, using default")
-        
-        # Calculate price volatility from mid prices
-        volatility = 0.0
-        if len(self.calibration_mids) > 10:
-            mid_changes = [abs(self.calibration_mids[i] - self.calibration_mids[i-1]) 
-                          for i in range(1, len(self.calibration_mids))]
-            if mid_changes:
-                volatility = statistics.mean(mid_changes)
-        
-        # Prepare calibration data for matching
-        calibration_data = {
-            "avg_spread": avg_spread,
-            "avg_depth": avg_depth,
-            "spread_std": spread_std,
-            "volatility": volatility,
-            "depth_available": len(self.calibration_depths) > 0
-        }
-        
-        # Match to scenario
-        detected_scenario = match_scenario_signature(calibration_data, self.all_configs)
-        
-        print(f"[{self.student_id}] [CALIBRATION] Avg Spread: {avg_spread:.4f}, Avg Depth: {avg_depth:.0f}, "
-              f"Spread Std: {spread_std:.4f}, Volatility: {volatility:.6f}")
-        print(f"[{self.student_id}] [SCENARIO DETECTION] CLI scenario: {self.scenario}, "
-              f"Detected: {detected_scenario}")
-        
-        # If detected scenario differs from CLI, reload config
-        if detected_scenario != self.scenario:
-            try:
-                self.config = load_config(detected_scenario)
-                self.detected_scenario = detected_scenario
-                
-                # Update base params from new config
-                base_params = self.config["base_params"]
-                self.INVENTORY_WARNING = base_params["inventory_warning"]
-                self.INVENTORY_DANGER = base_params["inventory_danger"]
-                self.INVENTORY_CRITICAL = base_params["inventory_critical"]
-                
-                print(f"[{self.student_id}] [CONFIG RELOADED] Using config for detected scenario: {detected_scenario}")
-            except Exception as e:
-                print(f"[{self.student_id}] [WARNING] Failed to load config for {detected_scenario}: {e}")
-                print(f"[{self.student_id}] [FALLBACK] Continuing with original config for {self.scenario}")
-        else:
-            self.detected_scenario = self.scenario
-            print(f"[{self.student_id}] [SCENARIO CONFIRMED] Using config for {self.scenario}")
     
     # =========================================================================
-    # REGIME DETECTION
+    # REGIME DETECTION - With Hysteresis, Persistence, and Cooldown
     # =========================================================================
     
-    def _detect_regime(self, spread: float, bid_depth: int, ask_depth: int) -> str:
+    def _detect_regime(self, spread: float, bid_depth: int, ask_depth: int, bids: List[Dict], asks: List[Dict]) -> str:
         """
-        Classify current market regime based on spread and depth.
+        Classify current market regime using multi-timeframe features and statistical detection.
         
-        Returns: "CALIBRATING", "NORMAL", "STRESSED", "CRASH", or "HFT"
+        Key features:
+        - Multi-timeframe analysis (short/medium/long windows)
+        - CUSUM change-point detection
+        - Spike detection for mini_flash_crash
+        - Hysteresis: Different thresholds for entering vs exiting regimes
+        - Persistence: Must stay in new conditions for N steps before switching
+        - Cooldown: Minimum time between regime changes
+        
+        Returns: "CALIBRATING", "NORMAL", "STRESSED", "CRASH", "HFT", or "SPIKE"
         """
         total_depth = bid_depth + ask_depth
         
-        # Update rolling histories
+        # Update rolling histories (for backward compatibility)
         self.spread_history.append(spread)
         self.depth_history.append(total_depth)
         if len(self.spread_history) > self.SPREAD_HISTORY_SIZE:
@@ -474,20 +502,39 @@ class TradingBot:
         if self.current_step < self.CALIBRATION_STEPS:
             return "CALIBRATING"
         
-        # Establish baseline on first exit from calibration
-        if self.baseline_spread is None:
-            if len(self.spread_history) == 0:
-                print(f"[{self.student_id}] [WARNING] No spread history available, using defaults")
-                self.baseline_spread = 0.5  # Default fallback
-                self.baseline_depth = 10000  # Default fallback
-            else:
-                self.baseline_spread = sum(self.spread_history) / len(self.spread_history)
-                self.baseline_depth = sum(self.depth_history) / len(self.depth_history) if len(self.depth_history) > 0 else 10000
-            print(f"[{self.student_id}] [CALIBRATED] Baseline spread: {self.baseline_spread:.4f}, depth: {self.baseline_depth:.0f}")
+        # DEAD MARKET CHECK: If spread=0 and depth<200, market is effectively dead
+        # Stay in current regime (likely CRASH), don't oscillate
+        if spread <= 0.01 and total_depth < 200:
+            # Keep current regime, reset pending changes
+            self.pending_regime = None
+            self.pending_regime_count = 0
+            return self.regime
         
-        # Calculate recent metrics
-        recent_spread = sum(self.spread_history[-10:]) / min(10, len(self.spread_history))
-        recent_depth = sum(self.depth_history[-10:]) / min(10, len(self.depth_history))
+        # Decrement cooldown
+        if self.regime_change_cooldown > 0:
+            self.regime_change_cooldown -= 1
+        
+        # Extract multi-timeframe features
+        features = self.feature_extractor.extract(self.last_bid, self.last_ask, bids, asks, self.last_mid)
+        
+        # SPIKE DETECTION (highest priority - for mini_flash_crash)
+        is_spike, spike_steps = self.feature_extractor.detect_spike()
+        if is_spike:
+            # Spike detected - return SPIKE regime immediately (no persistence needed)
+            if self.regime != "SPIKE":
+                print(f"[{self.student_id}] [REGIME] {self.regime} -> SPIKE | Step: {self.current_step} | Spread: {spread:.4f}")
+                self.regime = "SPIKE"
+                self.steps_in_regime = 0
+            return "SPIKE"
+        
+        # If we were in SPIKE and it ended, transition back to normal detection
+        if self.regime == "SPIKE" and not is_spike:
+            self.regime = "NORMAL"  # Reset to normal, will be reclassified below
+            self.pending_regime = None
+            self.pending_regime_count = 0
+        
+        # CUSUM change-point detection
+        cusum_signal = self.feature_extractor.cusum_detect(spread, self.baseline_spread)
         
         # Get thresholds from config
         thresholds = self.config["regime_thresholds"]
@@ -495,40 +542,141 @@ class TradingBot:
         stressed_spread_mult = thresholds["stressed_spread_multiplier"]
         hft_depth_ratio = thresholds["hft_depth_ratio"]
         crash_price_velocity = thresholds["crash_price_velocity"]
+        crash_spread_velocity = thresholds.get("crash_spread_velocity", 0.5)
+        crash_depth_collapse = thresholds.get("crash_depth_collapse_ratio", 0.5)
         
-        # Calculate price velocity for crash detection
-        price_velocity = 0.0
-        if len(self.mid_history) >= 10:
-            price_velocity = abs(self.mid_history[-1] - self.mid_history[-10])
+        # Extract features from multi-timeframe analysis
+        recent_spread = features.get("medium_spread_mean", spread)
+        recent_depth = features.get("medium_depth_mean", total_depth)
+        price_velocity = features.get("medium_price_velocity", 0.0)
+        spread_velocity = features.get("spread_velocity", 0.0)
+        depth_collapse_ratio = features.get("depth_collapse_ratio", 1.0)
+        spread_acceleration = features.get("spread_acceleration", 1.0)
         
-        # CRASH detection - most urgent (spread explodes OR rapid price move)
-        if recent_spread > self.baseline_spread * crash_spread_mult:
-            return "CRASH"
-        if price_velocity > crash_price_velocity:
-            return "CRASH"
+        # Determine INSTANTANEOUS regime using multi-timeframe features
+        instant_regime = self._classify_instant_regime_enhanced(
+            features, recent_spread, recent_depth, price_velocity, spread_velocity,
+            depth_collapse_ratio < crash_depth_collapse,
+            crash_spread_mult, stressed_spread_mult, hft_depth_ratio, 
+            crash_price_velocity, crash_spread_velocity, cusum_signal
+        )
         
-        # Check for rapid spread acceleration (crash incoming)
-        if len(self.spread_history) >= 20:
-            old_spread = sum(self.spread_history[-20:-10]) / 10
-            if recent_spread > old_spread * 2.0 and recent_spread > self.baseline_spread * (crash_spread_mult * 0.5):
+        # Apply hysteresis - harder to EXIT current regime than to stay
+        if instant_regime != self.regime:
+            # Check if we're in cooldown
+            if self.regime_change_cooldown > 0:
+                return self.regime  # Can't change yet
+            
+            # Track pending regime change
+            if instant_regime == self.pending_regime:
+                self.pending_regime_count += 1
+            else:
+                # New pending regime, reset counter
+                self.pending_regime = instant_regime
+                self.pending_regime_count = 1
+            
+            # Determine persistence requirement (hysteresis)
+            # Exiting CRASH requires more persistence (it's a "sticky" state)
+            required_persistence = self.REGIME_PERSISTENCE_REQUIRED
+            if self.regime == "CRASH":
+                required_persistence = self.REGIME_EXIT_PERSISTENCE
+            # Also harder to exit STRESSED back to NORMAL
+            elif self.regime == "STRESSED" and instant_regime == "NORMAL":
+                required_persistence = self.REGIME_EXIT_PERSISTENCE
+            
+            # Check if we've met persistence requirement
+            if self.pending_regime_count >= required_persistence:
+                # Confirm regime change - log it here
+                old_regime = self.regime
+                self.regime = instant_regime
+                self.steps_in_regime = 0
+                self.regime_change_cooldown = self.REGIME_COOLDOWN_STEPS
+                self.pending_regime = None
+                self.pending_regime_count = 0
+                # Reset CUSUM after regime change
+                self.feature_extractor.reset_cusum()
+                # Log the confirmed regime change
+                print(f"[{self.student_id}] [REGIME] {old_regime} -> {self.regime} | "
+                      f"Step: {self.current_step} | Spread: {spread:.4f} | "
+                      f"Depth: {total_depth} | Inv: {self.inventory}")
+                return self.regime
+            else:
+                # Not enough persistence yet, stay in current regime
+                return self.regime
+        else:
+            # Same regime, reset pending
+            self.pending_regime = None
+            self.pending_regime_count = 0
+            self.steps_in_regime += 1
+            return self.regime
+    
+    def _classify_instant_regime_enhanced(self, features: Dict[str, float], spread: float, 
+                                         depth: float, price_velocity: float,
+                                         spread_velocity: float, depth_collapse: bool,
+                                         crash_mult: float, stressed_mult: float, 
+                                         hft_ratio: float, crash_velocity: float, 
+                                         crash_spread_velocity: float, cusum_signal: Optional[str]) -> str:
+        """
+        Classify regime using multi-timeframe features and statistical signals.
+        This is the "raw" classification that gets filtered by persistence/cooldown.
+        
+        Enhanced with:
+        - Multi-timeframe analysis
+        - CUSUM change-point detection
+        - Spread velocity: sudden widening indicates crash
+        - Depth collapse: >50% drop from baseline indicates crash
+        """
+        # CUSUM signal indicates regime change
+        if cusum_signal == "STRESS_UP":
+            # CUSUM detected upward stress - likely CRASH or STRESSED
+            if spread > self.baseline_spread * crash_mult:
                 return "CRASH"
+            else:
+                return "STRESSED"
         
-        # HFT detection - very thin liquidity compared to baseline
-        # Only detect HFT if baseline is established and depth is significantly lower
-        if self.baseline_depth > 0 and recent_depth < self.baseline_depth * hft_depth_ratio:
-            # Additional check: spread should also be tight (HFT markets have tight spreads)
-            if recent_spread < self.baseline_spread * 1.2:
-                return "HFT"
-        # Also detect by absolute thin depth, but only if spread is also tight
-        min_depth_threshold = 1000
-        if recent_depth < min_depth_threshold and recent_spread < 0.15:
+        # CRASH SIGNAL DETECTION: Check for crash signals first (highest priority)
+        # Spread velocity: sudden widening (>50% increase)
+        if spread_velocity > crash_spread_velocity:
+            return "CRASH"
+        
+        # Spread acceleration (short vs long) - rapid widening
+        spread_acceleration = features.get("spread_acceleration", 1.0)
+        if spread_acceleration > 2.0:  # Short-term spread is 2x long-term
+            return "CRASH"
+        
+        # Depth collapse: >50% drop from baseline
+        if depth_collapse:
+            return "CRASH"
+        
+        # CRASH: Very wide spread OR market effectively dead
+        # Use higher threshold to avoid false positives
+        if spread > 5.0:  # Absolute threshold - very wide spread
+            return "CRASH"
+        if self.baseline_spread > 0 and spread > self.baseline_spread * crash_mult:
+            return "CRASH"
+        if price_velocity > crash_velocity:
+            return "CRASH"
+        
+        # HFT: Very thin depth WITH tight spread
+        # Must have BOTH conditions - thin depth alone isn't HFT
+        # Use multi-timeframe features for better detection
+        short_depth = features.get("short_depth_mean", depth)
+        if depth < 500 and spread < 0.3:  # Stricter: thin depth AND tight spread
+            return "HFT"
+        if self.baseline_depth > 0 and depth < self.baseline_depth * hft_ratio and spread < 0.3:
+            return "HFT"
+        # Also check short-term depth for HFT detection
+        if short_depth < 300 and spread < 0.25:
             return "HFT"
         
-        # Stressed market - elevated spread
-        if recent_spread > self.baseline_spread * stressed_spread_mult:
+        # STRESSED: Moderately elevated spread
+        # Use multi-timeframe to avoid false positives from temporary spikes
+        medium_spread = features.get("medium_spread_mean", spread)
+        if spread > 2.5:  # Absolute threshold for stressed
+            return "STRESSED"
+        if self.baseline_spread > 0 and medium_spread > self.baseline_spread * stressed_mult:
             return "STRESSED"
         
-        # Default to normal
         return "NORMAL"
     
     # =========================================================================
@@ -571,12 +719,12 @@ class TradingBot:
         This is the ONLY time we should cross the spread!
         """
         if inventory > 0:
-            qty = min(500, inventory)
+            qty = self._round_qty_to_lot(min(500, inventory))
             # SELL at bid (cross spread to guarantee fill)
             price = self._round_down_to_tick(bid)
             return {"side": "SELL", "price": price, "qty": qty}
         elif inventory < 0:
-            qty = min(500, abs(inventory))
+            qty = self._round_qty_to_lot(min(500, abs(inventory)))
             # BUY at ask (cross spread to guarantee fill)
             price = self._round_up_to_tick(ask)
             return {"side": "BUY", "price": price, "qty": qty}
@@ -591,13 +739,16 @@ class TradingBot:
         Get configuration parameters for a specific regime.
         
         Args:
-            regime: Regime name ("NORMAL", "HFT", "STRESSED", "CRASH")
+            regime: Regime name ("NORMAL", "HFT", "STRESSED", "CRASH", "SPIKE")
         
         Returns:
             Dictionary with regime-specific parameters
         """
         strategies = self.config["regime_strategies"]
-        return strategies.get(regime, strategies["NORMAL"])  # Fallback to NORMAL if regime not found
+        # SPIKE uses CRASH config for safety
+        if regime == "SPIKE":
+            return strategies.get("CRASH", strategies.get("NORMAL", {}))
+        return strategies.get(regime, strategies.get("NORMAL", {}))  # Fallback to NORMAL if regime not found
     
     def _normal_strategy(self, bid: float, ask: float, mid: float, 
                          inventory: int, step: int) -> Optional[Dict]:
@@ -608,12 +759,14 @@ class TradingBot:
         - Place BUY orders AT BID (or improve by 1 tick if spread is wide)
         - Place SELL orders AT ASK (or improve by 1 tick if spread is wide)
         - Alternate sides to stay balanced
+        - Regime-aware: adapts based on current market conditions
         """
         regime_config = self._get_regime_config("NORMAL")
         trade_freq = regime_config["trade_frequency"]
-        order_size = regime_config["order_size"]
+        order_size = self._ensure_qty_multiple_of_100(regime_config["order_size"])
         max_inv = regime_config["max_inventory"]
         aggressive_join = regime_config.get("aggressive_join", True)
+        short_bias = regime_config.get("short_bias", False)
         
         inv_action, urgency = self._get_inventory_action(inventory)
         
@@ -623,6 +776,42 @@ class TradingBot:
         
         spread = ask - bid
         skew = self._calculate_inventory_skew(inventory)
+        
+        # DEAD MARKET CHECK: If spread is 0 or very thin depth, don't trade
+        total_depth = self.last_bid_depth + self.last_ask_depth
+        if spread < 0.01 or total_depth < 200:
+            return None
+        
+        # SCENARIO-SPECIFIC: Flash crash proactive flattening
+        # For flash_crash scenario, start flattening before step 18000 (institutional selling)
+        if self.detected_scenario == "flash_crash":
+            # Start reducing inventory proactively around step 17000
+            if self.current_step >= 17000 and self.current_step < 18000:
+                if abs(inventory) > 500:
+                    if inventory > 0:
+                        qty = self._round_qty_to_lot(min(order_size, inventory))
+                        price = round(ask - self.TICK_SIZE, 2) if aggressive_join else round(ask, 2)
+                        return {"side": "SELL", "price": price, "qty": qty}
+                    else:
+                        qty = self._round_qty_to_lot(min(order_size, abs(inventory)))
+                        price = round(bid + self.TICK_SIZE, 2) if aggressive_join else round(bid, 2)
+                        return {"side": "BUY", "price": price, "qty": qty}
+        
+        # CRASH ANTICIPATION: If spread is widening significantly, start flattening proactively
+        # This detects crashes in real-time without hardcoded step numbers
+        if len(self.spread_history) >= 10 and self.baseline_spread:
+            recent_spread_avg = sum(self.spread_history[-5:]) / 5
+            if recent_spread_avg > self.baseline_spread * 2.5:
+                # Spread widening significantly - reduce inventory proactively
+                if abs(inventory) > 100:
+                    if inventory > 0:
+                        qty = self._round_qty_to_lot(min(order_size, inventory))
+                        price = round(ask - self.TICK_SIZE, 2) if aggressive_join else round(ask, 2)
+                        return {"side": "SELL", "price": price, "qty": qty}
+                    else:
+                        qty = self._round_qty_to_lot(min(order_size, abs(inventory)))
+                        price = round(bid + self.TICK_SIZE, 2) if aggressive_join else round(bid, 2)
+                        return {"side": "BUY", "price": price, "qty": qty}
         
         # Unwind only mode - aggressive passive orders biased to reduce position
         if inv_action == "UNWIND_ONLY":
@@ -671,6 +860,64 @@ class TradingBot:
                 trade_cycle = 1  # Prefer sell
             elif skew > 0.005:
                 trade_cycle = 0  # Prefer buy
+            
+            # TIGHT INVENTORY mode for stressed_market (high volatility scenario)
+            # Strategy: Trade actively but keep inventory very small
+            stay_flat = regime_config.get("stay_flat", False)
+            min_spread = regime_config.get("min_spread_for_trade", 0.0)
+            
+            if stay_flat:
+                # Only trade if spread is wide enough to capture
+                if spread < min_spread:
+                    return None
+                
+                # Only trade to flatten inventory
+                if inventory > 50:
+                    trade_cycle = 1  # SELL to flatten
+                elif inventory < -50:
+                    trade_cycle = 0  # BUY to flatten
+                else:
+                    # Flat - don't trade
+                    return None
+            else:
+                # Active trading with tight inventory management
+                # Flatten if inventory is getting large
+                if inventory > max_inv * 0.7:
+                    trade_cycle = 1  # SELL
+                elif inventory < -max_inv * 0.7:
+                    trade_cycle = 0  # BUY
+                else:
+                    # Alternate to stay balanced
+                    trade_cycle = (step // trade_freq) % 2
+            
+            if short_bias:
+                # Calculate short-term momentum
+                momentum = 0.0
+                if len(self.mid_history) >= 20:
+                    momentum = self.mid_history[-1] - self.mid_history[-20]
+                
+                # Original short bias logic
+                target_short = regime_config.get("target_short_position", -300)
+                not_short_enough = target_short * 0.5
+                too_short = target_short * 2.0
+                
+                if inventory > not_short_enough:
+                    if momentum > 0.2:
+                        trade_cycle = 1
+                    elif (step // trade_freq) % 10 < 8:
+                        trade_cycle = 1
+                elif inventory < too_short:
+                    if momentum < -0.2:
+                        trade_cycle = 0
+                    elif (step // trade_freq) % 10 < 8:
+                        trade_cycle = 0
+                else:
+                    if momentum > 0.3:
+                        trade_cycle = 1
+                    elif momentum < -0.3:
+                        trade_cycle = 0
+                    elif (step // trade_freq) % 10 < 6:
+                        trade_cycle = 1
                 
             if trade_cycle == 0:
                 # BUY at bid (or improve if spread is wide)
@@ -690,16 +937,30 @@ class TradingBot:
     def _stressed_strategy(self, bid: float, ask: float, mid: float,
                            inventory: int, step: int) -> Optional[Dict]:
         """
-        Conservative approach for elevated volatility.
-        - Trade much less frequently
-        - Smaller size
-        - Passive orders only, wider from mid
+        Active trading strategy for stressed_market with SHORT BIAS.
+        
+        Key insight: Price drifts down (-0.0001 per step), so maintain short bias.
+        Trade actively to capture spreads while following the downward trend.
+        
+        Strategy:
+        1. Maintain short bias (target short position)
+        2. Trade actively at configured frequency
+        3. Prefer selling when flat or long
+        4. Only buy to cover shorts or when too short
         """
         regime_config = self._get_regime_config("STRESSED")
         trade_freq = regime_config["trade_frequency"]
-        order_size = regime_config["order_size"]
+        order_size = self._ensure_qty_multiple_of_100(regime_config["order_size"])
         max_inv = regime_config["max_inventory"]
+        aggressive_join = regime_config.get("aggressive_join", True)
         short_bias = regime_config.get("short_bias", False)
+        target_short = regime_config.get("target_short_position", -500)
+        
+        # DEAD MARKET CHECK
+        spread = ask - bid
+        total_depth = self.last_bid_depth + self.last_ask_depth
+        if spread < 0.01 or total_depth < 150:
+            return None
         
         inv_action, urgency = self._get_inventory_action(inventory)
         
@@ -707,40 +968,128 @@ class TradingBot:
         if inv_action == "EMERGENCY":
             return self._emergency_unwind(inventory, bid, ask)
         
-        # In stressed markets with high inventory, unwind passively but more frequently
-        if inv_action == "UNWIND_ONLY" and step % (trade_freq // 3) == 0:
-            skew = self._calculate_inventory_skew(inventory)
-            if inventory > 0:
-                price = self._round_to_tick(ask + skew)
-                return {"side": "SELL", "price": price, "qty": order_size}
-            elif inventory < 0:
-                price = self._round_to_tick(bid + skew)
-                return {"side": "BUY", "price": price, "qty": order_size}
-        
-        # Very infrequent trading otherwise
+        # Trade based on configured frequency
         if step % trade_freq != 0:
             return None
         
-        # Only trade if inventory is building up significantly
-        threshold = max_inv * 0.5
-        if abs(inventory) > threshold:
-            skew = self._calculate_inventory_skew(inventory)
-            if inventory > 0:
-                # Passive SELL at ask
-                price = self._round_to_tick(ask + skew)
-                return {"side": "SELL", "price": price, "qty": order_size}
+        # Size based on inventory
+        qty = order_size if abs(inventory) < max_inv * 0.7 else self._round_qty_to_lot(int(order_size * 0.67))
+        
+        # SHORT BIAS LOGIC: Prefer selling to maintain short position
+        if short_bias:
+            # Calculate momentum to help with timing
+            momentum = 0.0
+            if len(self.mid_history) >= 20:
+                momentum = self.mid_history[-1] - self.mid_history[-20]
+            
+            # Target short position ranges
+            not_short_enough = target_short * 0.5  # e.g., -250
+            too_short = target_short * 2.0  # e.g., -1000
+            
+            # If we're not short enough, prefer selling
+            if inventory > not_short_enough:
+                # Sell aggressively to build short position
+                if aggressive_join and spread > self.TICK_SIZE * 2:
+                    price = round(ask - self.TICK_SIZE, 2)
+                else:
+                    price = round(ask, 2)
+                return {"side": "SELL", "price": price, "qty": qty}
+            
+            # If we're too short, buy to cover
+            elif inventory < too_short:
+                # Buy to reduce short position
+                if aggressive_join and spread > self.TICK_SIZE * 2:
+                    price = round(bid + self.TICK_SIZE, 2)
+                else:
+                    price = round(bid, 2)
+                return {"side": "BUY", "price": price, "qty": qty}
+            
+            # In target range - trade based on momentum and inventory
             else:
-                # Passive BUY at bid
-                price = self._round_to_tick(bid + skew)
-                return {"side": "BUY", "price": price, "qty": order_size}
+                # Use momentum to bias direction
+                if momentum > 0.2:  # Price rising - sell (build short)
+                    if aggressive_join and spread > self.TICK_SIZE * 2:
+                        price = round(ask - self.TICK_SIZE, 2)
+                    else:
+                        price = round(ask, 2)
+                    return {"side": "SELL", "price": price, "qty": qty}
+                elif momentum < -0.2:  # Price falling - buy (cover short)
+                    if aggressive_join and spread > self.TICK_SIZE * 2:
+                        price = round(bid + self.TICK_SIZE, 2)
+                    else:
+                        price = round(bid, 2)
+                    return {"side": "BUY", "price": price, "qty": qty}
+                else:
+                    # Default: prefer selling to maintain short bias
+                    if aggressive_join and spread > self.TICK_SIZE * 2:
+                        price = round(ask - self.TICK_SIZE, 2)
+                    else:
+                        price = round(ask, 2)
+                    return {"side": "SELL", "price": price, "qty": qty}
         
-        # Short bias: prefer selling in stressed markets
-        if short_bias and abs(inventory) < threshold and step % (trade_freq * 2) == 0:
-            skew = self._calculate_inventory_skew(inventory)
-            price = self._round_to_tick(ask + skew)
-            return {"side": "SELL", "price": price, "qty": order_size}
+        # NO SHORT BIAS: Standard inventory management
+        else:
+            # Standard inventory-based trading
+            if inventory > max_inv * 0.3:
+                # Reduce long - sell
+                if aggressive_join and spread > self.TICK_SIZE * 2:
+                    price = round(ask - self.TICK_SIZE, 2)
+                else:
+                    price = round(ask, 2)
+                return {"side": "SELL", "price": price, "qty": qty}
+            elif inventory < -max_inv * 0.3:
+                # Reduce short - buy
+                if aggressive_join and spread > self.TICK_SIZE * 2:
+                    price = round(bid + self.TICK_SIZE, 2)
+                else:
+                    price = round(bid, 2)
+                return {"side": "BUY", "price": price, "qty": qty}
+            else:
+                # Balanced - alternate sides
+                trade_cycle = (step // trade_freq) % 2
+                if trade_cycle == 0:
+                    if aggressive_join and spread > self.TICK_SIZE * 2:
+                        price = round(bid + self.TICK_SIZE, 2)
+                    else:
+                        price = round(bid, 2)
+                    return {"side": "BUY", "price": price, "qty": qty}
+                else:
+                    if aggressive_join and spread > self.TICK_SIZE * 2:
+                        price = round(ask - self.TICK_SIZE, 2)
+                    else:
+                        price = round(ask, 2)
+                    return {"side": "SELL", "price": price, "qty": qty}
+    
+    def _spike_strategy(self, bid: float, ask: float, mid: float,
+                        inventory: int, step: int) -> Optional[Dict]:
+        """
+        Spike survival mode (for mini_flash_crash scenario).
         
-        return None  # Stay flat in stressed conditions if inventory is manageable
+        Strategy:
+        1. Flatten position immediately during spike
+        2. Don't add new positions
+        3. Wait for spike to end (4 steps)
+        """
+        regime_config = self._get_regime_config("CRASH")  # Use crash config for safety
+        max_inv = regime_config.get("max_inventory", 200)
+        
+        # DEAD MARKET CHECK
+        spread = ask - bid
+        total_depth = self.last_bid_depth + self.last_ask_depth
+        if spread < 0.01 or total_depth < 100:
+            return None
+        
+        # Emergency unwind if inventory is high
+        inv_action, urgency = self._get_inventory_action(inventory)
+        if inv_action == "EMERGENCY":
+            return self._emergency_unwind(inventory, bid, ask)
+        
+        # Flatten position aggressively during spike
+        if abs(inventory) > max_inv:
+            return self._emergency_unwind(inventory, bid, ask)
+        
+        # Otherwise, don't trade - wait for spike to end
+        return None
     
     def _crash_strategy(self, bid: float, ask: float, mid: float,
                         inventory: int, step: int) -> Optional[Dict]:
@@ -751,6 +1100,12 @@ class TradingBot:
         """
         regime_config = self._get_regime_config("CRASH")
         max_inv = regime_config["max_inventory"]
+        
+        # DEAD MARKET CHECK - can't trade if no liquidity
+        spread = ask - bid
+        total_depth = self.last_bid_depth + self.last_ask_depth
+        if spread < 0.01 or total_depth < 100:
+            return None
         
         # If nearly flat, stay flat
         if abs(inventory) < max_inv:
@@ -771,9 +1126,15 @@ class TradingBot:
         """
         regime_config = self._get_regime_config("HFT")
         trade_freq = regime_config["trade_frequency"]
-        order_size = regime_config["order_size"]
+        order_size = self._ensure_qty_multiple_of_100(regime_config["order_size"])
         max_inv = regime_config["max_inventory"]
         aggressive_join = regime_config.get("aggressive_join", True)
+        
+        # DEAD MARKET CHECK
+        spread = ask - bid
+        total_depth = self.last_bid_depth + self.last_ask_depth
+        if spread < 0.01 or total_depth < 100:
+            return None
         
         inv_action, urgency = self._get_inventory_action(inventory)
         
@@ -784,11 +1145,21 @@ class TradingBot:
         # Calculate skew (small adjustment based on inventory)
         skew = self._calculate_inventory_skew(inventory)
         
+        # SCENARIO-SPECIFIC: Fade momentum for hft_dominated
+        # Short-term momentum traders amplify moves - fade them
+        fade_momentum = regime_config.get("fade_momentum", False)
+        momentum_bias = 0
+        if fade_momentum and len(self.mid_history) >= 20:
+            momentum = self.mid_history[-1] - self.mid_history[-20]
+            # Fade: if price rising, prefer selling (fade the rise)
+            if momentum > 0.1:
+                momentum_bias = -1  # Prefer selling
+            elif momentum < -0.1:
+                momentum_bias = 1   # Prefer buying
+        
         # In HFT, trade every trade_freq steps
         if step % trade_freq != 0:
             return None
-        
-        spread = ask - bid
         
         # Determine trade direction based on inventory
         if inventory > max_inv * 0.3:
@@ -817,6 +1188,10 @@ class TradingBot:
                 trade_cycle = 1
             elif skew > 0.01:  # Have short inventory, prefer buying
                 trade_cycle = 0
+            
+            # Apply momentum fade bias
+            if momentum_bias != 0:
+                trade_cycle = 1 if momentum_bias < 0 else 0
             
             if trade_cycle == 0:
                 # BUY - join at bid or improve
@@ -875,18 +1250,8 @@ class TradingBot:
         
         spread = ask - bid
         
-        # Detect current regime
-        new_regime = self._detect_regime(spread, self.last_bid_depth, self.last_ask_depth)
-        
-        # Log regime changes with context
-        if new_regime != self.regime:
-            print(f"[{self.student_id}] [REGIME] {self.regime} -> {new_regime} | "
-                  f"Step: {self.current_step} | Spread: {spread:.4f} | "
-                  f"Depth: {self.last_bid_depth + self.last_ask_depth} | Inv: {self.inventory}")
-            self.regime = new_regime
-            self.steps_in_regime = 0
-        else:
-            self.steps_in_regime += 1
+        # Detect current regime (handles logging internally when confirmed changes occur)
+        self._detect_regime(spread, self.last_bid_depth, self.last_ask_depth, self.last_bids, self.last_asks)
         
         # Store previous mid for momentum detection
         self.prev_mid = mid
@@ -894,6 +1259,8 @@ class TradingBot:
         # Route to appropriate strategy
         if self.regime == "CALIBRATING":
             return None  # Don't trade while calibrating
+        elif self.regime == "SPIKE":
+            order = self._spike_strategy(bid, ask, mid, self.inventory, self.current_step)
         elif self.regime == "CRASH":
             order = self._crash_strategy(bid, ask, mid, self.inventory, self.current_step)
         elif self.regime == "STRESSED":

@@ -2,9 +2,11 @@
   "scenario_id": "hft_dominated",
   "description": "8 aggressive MMs (gamma=2.5, safeInv=300, rest=3000), 50 short-term momentum traders",
   "detection_signature": {
-    "spread_range": [0.05, 0.15],
-    "depth_range": [500, 2000],
-    "volatility_range": [0.0005, 0.0015]
+    "spread_range": [0.05, 0.20],
+    "depth_range": [500, 3000],
+    "volatility_range": [0.0005, 0.0015],
+    "price_drift_threshold": 0.0,
+    "mm_count_estimate": 8
   },
   "base_params": {
     "tick_size": 0.25,

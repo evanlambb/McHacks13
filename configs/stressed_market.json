@@ -1,51 +1,61 @@
 {
   "scenario_id": "stressed_market",
+  "description": "3 MMs (gamma=1.5, safeInv=500, rest=18000), negative drift (-0.0001), high volatility (0.002)",
   "detection_signature": {
-    "spread_range": [0.75, 1.5],
-    "depth_range": [3000, 8000],
-    "volatility_range": [0.0015, 0.003]
+    "spread_range": [0.3, 2.5],
+    "depth_range": [1000, 6000],
+    "volatility_range": [0.001, 0.004],
+    "price_drift_threshold": -0.0003,
+    "mm_count_estimate": 3
   },
   "base_params": {
     "tick_size": 0.25,
-    "calibration_steps": 300,
-    "inventory_warning": 1500,
-    "inventory_danger": 2500,
-    "inventory_critical": 3500
+    "calibration_steps": 500,
+    "inventory_warning": 300,
+    "inventory_danger": 500,
+    "inventory_critical": 800
   },
   "regime_thresholds": {
-    "crash_spread_multiplier": 2.5,
-    "stressed_spread_multiplier": 1.5,
-    "hft_depth_ratio": 0.6,
-    "crash_price_velocity": 1.5
+    "crash_spread_multiplier": 6.0,
+    "stressed_spread_multiplier": 3.0,
+    "hft_depth_ratio": 0.25,
+    "crash_price_velocity": 3.0
   },
   "regime_strategies": {
     "NORMAL": {
-      "trade_frequency": 100,
+      "trade_frequency": 25,
       "order_size": 200,
-      "max_inventory": 2000,
+      "max_inventory": 500,
       "spread_capture": true,
       "compete": true,
-      "short_bias": true
+      "aggressive_join": true,
+      "short_bias": true,
+      "target_short_position": -500
     },
     "HFT": {
-      "trade_frequency": 150,
-      "order_size": 100,
-      "max_inventory": 1500,
-      "spread_capture": true,
-      "compete": false
-    },
-    "STRESSED": {
-      "trade_frequency": 120,
+      "trade_frequency": 20,
       "order_size": 200,
-      "max_inventory": 1500,
+      "max_inventory": 400,
       "spread_capture": true,
       "compete": true,
-      "short_bias": true
+      "aggressive_join": true,
+      "short_bias": true,
+      "target_short_position": -400
+    },
+    "STRESSED": {
+      "trade_frequency": 30,
+      "order_size": 200,
+      "max_inventory": 500,
+      "spread_capture": true,
+      "compete": true,
+      "aggressive_join": true,
+      "short_bias": true,
+      "target_short_position": -500
     },
     "CRASH": {
       "trade_frequency": 1,
-      "order_size": 500,
-      "max_inventory": 200,
+      "order_size": 200,
+      "max_inventory": 100,
       "spread_capture": false,
       "unwind_only": true,
       "compete": false

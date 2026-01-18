@@ -1,0 +1,63 @@
+{
+  "scenario_id": "unified",
+  "description": "Unified adaptive config that works across all scenarios using regime detection",
+  "detection_signature": {
+    "spread_range": [0.1, 5.0],
+    "depth_range": [100, 20000],
+    "volatility_range": [0.0005, 0.01]
+  },
+  "base_params": {
+    "tick_size": 0.25,
+    "calibration_steps": 300,
+    "inventory_warning": 1500,
+    "inventory_danger": 3000,
+    "inventory_critical": 4000
+  },
+  "regime_thresholds": {
+    "crash_spread_multiplier": 3.0,
+    "stressed_spread_multiplier": 2.0,
+    "hft_depth_ratio": 0.4,
+    "crash_price_velocity": 1.5,
+    "crash_spread_velocity": 0.5,
+    "crash_depth_collapse_ratio": 0.5
+  },
+  "regime_strategies": {
+    "NORMAL": {
+      "trade_frequency": 15,
+      "order_size": 250,
+      "max_inventory": 1500,
+      "spread_capture": true,
+      "compete": true,
+      "aggressive_join": true,
+      "two_sided": true
+    },
+    "HFT": {
+      "trade_frequency": 10,
+      "order_size": 200,
+      "max_inventory": 800,
+      "spread_capture": true,
+      "compete": true,
+      "aggressive_join": true,
+      "two_sided": true
+    },
+    "STRESSED": {
+      "trade_frequency": 30,
+      "order_size": 200,
+      "max_inventory": 1000,
+      "spread_capture": true,
+      "compete": true,
+      "aggressive_join": true,
+      "short_bias": true,
+      "target_short_position": -500
+    },
+    "CRASH": {
+      "trade_frequency": 1,
+      "order_size": 500,
+      "max_inventory": 200,
+      "spread_capture": false,
+      "unwind_only": true,
+      "compete": false
+    }
+  }
+}
+

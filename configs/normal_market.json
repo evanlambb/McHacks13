@@ -1,10 +1,12 @@
 {
   "scenario_id": "normal_market",
-  "description": "Optimized for 5 MMs (gamma=0.8, safeInv=2000, rest=600), 30 fundamental traders (interval=100)",
+  "description": "5 MMs (gamma=0.8, safeInv=2000, rest=600), positive drift (+0.00001), low volatility (0.001)",
   "detection_signature": {
     "spread_range": [0.25, 0.75],
     "depth_range": [5000, 20000],
-    "volatility_range": [0.0005, 0.002]
+    "volatility_range": [0.0005, 0.002],
+    "price_drift_threshold": 0.0,
+    "mm_count_estimate": 5
   },
   "base_params": {
     "tick_size": 0.25,

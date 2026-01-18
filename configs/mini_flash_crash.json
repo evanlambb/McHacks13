@@ -1,9 +1,12 @@
 {
   "scenario_id": "mini_flash_crash",
+  "description": "5 MMs, 2 spiking traders (0.5% activation), NO fundamental drift",
   "detection_signature": {
     "spread_range": [0.25, 3.0],
     "depth_range": [5000, 15000],
-    "volatility_range": [0.001, 0.005]
+    "volatility_range": [0.001, 0.005],
+    "price_drift_threshold": 0.0,
+    "mm_count_estimate": 5
   },
   "base_params": {
     "tick_size": 0.25,
