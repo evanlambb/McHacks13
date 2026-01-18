@@ -1,0 +1,55 @@
+{
+  "scenario_id": "stressed_market",
+  "detection_signature": {
+    "spread_range": [0.75, 1.5],
+    "depth_range": [3000, 8000],
+    "volatility_range": [0.0015, 0.003]
+  },
+  "base_params": {
+    "tick_size": 0.25,
+    "calibration_steps": 300,
+    "inventory_warning": 1500,
+    "inventory_danger": 2500,
+    "inventory_critical": 3500
+  },
+  "regime_thresholds": {
+    "crash_spread_multiplier": 2.5,
+    "stressed_spread_multiplier": 1.5,
+    "hft_depth_ratio": 0.6,
+    "crash_price_velocity": 1.5
+  },
+  "regime_strategies": {
+    "NORMAL": {
+      "trade_frequency": 100,
+      "order_size": 200,
+      "max_inventory": 2000,
+      "spread_capture": true,
+      "compete": true,
+      "short_bias": true
+    },
+    "HFT": {
+      "trade_frequency": 150,
+      "order_size": 150,
+      "max_inventory": 1500,
+      "spread_capture": true,
+      "compete": false
+    },
+    "STRESSED": {
+      "trade_frequency": 120,
+      "order_size": 200,
+      "max_inventory": 1500,
+      "spread_capture": true,
+      "compete": true,
+      "short_bias": true
+    },
+    "CRASH": {
+      "trade_frequency": 1,
+      "order_size": 500,
+      "max_inventory": 200,
+      "spread_capture": false,
+      "unwind_only": true,
+      "compete": false
+    }
+  }
+}
+

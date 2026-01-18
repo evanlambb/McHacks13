@@ -1,0 +1,53 @@
+{
+  "scenario_id": "default",
+  "detection_signature": {
+    "spread_range": [0.25, 1.0],
+    "depth_range": [3000, 15000],
+    "volatility_range": [0.0005, 0.003]
+  },
+  "base_params": {
+    "tick_size": 0.25,
+    "calibration_steps": 300,
+    "inventory_warning": 2000,
+    "inventory_danger": 3500,
+    "inventory_critical": 4500
+  },
+  "regime_thresholds": {
+    "crash_spread_multiplier": 3.0,
+    "stressed_spread_multiplier": 1.8,
+    "hft_depth_ratio": 0.5,
+    "crash_price_velocity": 2.0
+  },
+  "regime_strategies": {
+    "NORMAL": {
+      "trade_frequency": 50,
+      "order_size": 200,
+      "max_inventory": 2500,
+      "spread_capture": true,
+      "compete": true
+    },
+    "HFT": {
+      "trade_frequency": 150,
+      "order_size": 100,
+      "max_inventory": 1000,
+      "spread_capture": true,
+      "compete": false
+    },
+    "STRESSED": {
+      "trade_frequency": 100,
+      "order_size": 200,
+      "max_inventory": 2000,
+      "spread_capture": true,
+      "compete": true
+    },
+    "CRASH": {
+      "trade_frequency": 1,
+      "order_size": 500,
+      "max_inventory": 200,
+      "spread_capture": false,
+      "unwind_only": true,
+      "compete": false
+    }
+  }
+}
+
