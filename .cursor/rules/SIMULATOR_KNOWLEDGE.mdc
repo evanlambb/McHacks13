@@ -1,0 +1,69 @@
+---
+description: Complete reverse-engineered knowledge of the market simulator
+alwaysApply: true
+---
+# Simulator Knowledge Base
+
+## Critical Document
+
+**READ THIS FIRST**: `/simulator_analysis/SIMULATOR_ANALYSIS.md`
+
+This document contains complete reverse-engineered logic from the exchange simulator JAR file, including:
+- All trader decision algorithms (verified Java source code)
+- Exact parameter transformations
+- Scenario-specific analysis
+- Strategic insights and exploits
+- Recommended algorithm architecture
+
+## Decompiled Source Code
+
+Full verified Java source files available in `/simulator_analysis/decompiled/`:
+- `BaseTrader.java` - Abstract base class
+- `SpikingTrader.java` - Volatility spike logic
+- `InstitutionalTrader.java` - Flash crash trigger
+- `MarketMaker.java` - Liquidity provider with stress mode
+- `MomentumTrader.java` - Trend following
+- `FundamentalTrader.java` - Mean reversion
+- `NoiseTrader.java` - Random activity
+- `SimulationContext.java` - Parameter transformations
+- `DeterministicRandom.java` - Seeded RNG
+
+## Quick Reference
+
+### Key Insights
+
+1. **InstitutionalTrader** (flash_crash):
+   - Starts at step 18,000 (30 min in)
+   - Sells every 120 steps
+   - Sells 9% of rolling volume
+
+2. **MarketMaker withdrawal**:
+   - Enters stress mode at inventory limit
+   - Gone for 600-18,000 steps depending on scenario
+   - Creates liquidity vacuum
+
+3. **SpikingTrader** (mini_flash_crash):
+   - 0.5% activation probability per step
+   - Exactly 4 steps of market orders
+   - 100 shares per step
+
+### Parameter Transformations
+
+⚠️ **Critical**: JSON parameters are transformed:
+- `orderInterval` → `value × 10` steps
+- `percentageOfVolume` → `value ÷ 100`
+- `startTime` → `((hour-8)×3600 + min×60 + sec) × 10` steps
+
+## When to Use This Knowledge
+
+- **Algorithm Design**: Use trader logic to predict behavior
+- **Strategy Optimization**: Exploit known patterns
+- **Crash Detection**: Use exact thresholds from decompiled code
+- **Parameter Tuning**: Reference scenario configurations
+
+## Development Workflow
+
+1. Read `/simulator_analysis/SIMULATOR_ANALYSIS.md` for complete context
+2. Reference decompiled Java files for exact logic
+3. Build counter-strategies that exploit predictable AI behavior
+4. Test against deterministic scenarios

@@ -7,3 +7,4 @@ __pycache__/
 app/simulator.db
 app/simulator.db-wal
 app/simulator.db-shm
+*.db*
