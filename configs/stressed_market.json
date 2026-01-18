@@ -29,7 +29,7 @@
     },
     "HFT": {
       "trade_frequency": 150,
-      "order_size": 150,
+      "order_size": 100,
       "max_inventory": 1500,
       "spread_capture": true,
       "compete": false

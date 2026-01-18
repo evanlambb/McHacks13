@@ -1,5 +1,6 @@
 {
   "scenario_id": "normal_market",
+  "description": "Optimized for 5 MMs (gamma=0.8, safeInv=2000, rest=600), 30 fundamental traders (interval=100)",
   "detection_signature": {
     "spread_range": [0.25, 0.75],
     "depth_range": [5000, 20000],
@@ -7,10 +8,10 @@
   },
   "base_params": {
     "tick_size": 0.25,
-    "calibration_steps": 300,
-    "inventory_warning": 2000,
-    "inventory_danger": 3500,
-    "inventory_critical": 4500
+    "calibration_steps": 200,
+    "inventory_warning": 1800,
+    "inventory_danger": 3000,
+    "inventory_critical": 4200
   },
   "regime_thresholds": {
     "crash_spread_multiplier": 3.0,
@@ -20,23 +21,29 @@
   },
   "regime_strategies": {
     "NORMAL": {
-      "trade_frequency": 20,
+      "trade_frequency": 10,
       "order_size": 300,
-      "max_inventory": 3000,
+      "max_inventory": 1200,
       "spread_capture": true,
-      "compete": true
+      "compete": true,
+      "aggressive_join": true,
+      "two_sided": true,
+      "long_bias": 0.52,
+      "fundamental_interval_sync": 100
     },
     "HFT": {
-      "trade_frequency": 200,
-      "order_size": 100,
-      "max_inventory": 1000,
+      "trade_frequency": 8,
+      "order_size": 200,
+      "max_inventory": 800,
       "spread_capture": true,
-      "compete": false
+      "compete": true,
+      "aggressive_join": true,
+      "two_sided": true
     },
     "STRESSED": {
-      "trade_frequency": 100,
+      "trade_frequency": 75,
       "order_size": 200,
-      "max_inventory": 2000,
+      "max_inventory": 1500,
       "spread_capture": true,
       "compete": true
     },

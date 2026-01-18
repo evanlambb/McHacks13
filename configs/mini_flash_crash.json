@@ -22,7 +22,7 @@
   "regime_strategies": {
     "NORMAL": {
       "trade_frequency": 40,
-      "order_size": 250,
+      "order_size": 200,
       "max_inventory": 2000,
       "spread_capture": true,
       "compete": true,
@@ -30,7 +30,7 @@
     },
     "HFT": {
       "trade_frequency": 100,
-      "order_size": 150,
+      "order_size": 100,
       "max_inventory": 1500,
       "spread_capture": true,
       "compete": false

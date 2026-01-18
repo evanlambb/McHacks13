@@ -312,6 +312,13 @@ class TradingBot:
             
             if order and self.order_ws and self.order_ws.sock:
                 self._send_order(order)
+                
+                # Two-sided quoting: also send opposite side order if enabled
+                regime_config = self._get_regime_config(self.regime)
+                if regime_config.get("two_sided", False) and abs(self.inventory) < regime_config.get("max_inventory", 1000) * 0.8:
+                    opposite_order = self._get_opposite_order(order, self.last_bid, self.last_ask, regime_config)
+                    if opposite_order:
+                        self._send_order(opposite_order)
             
             # Signal DONE to advance to next step
             self._send_done()
@@ -326,6 +333,35 @@ class TradingBot:
     def _round_to_tick(self, price: float) -> float:
         """Round price to nearest tick size (0.25)."""
         return round(round(price / self.TICK_SIZE) * self.TICK_SIZE, 2)
+    
+    def _round_qty_to_lot(self, qty: int, min_qty: int = 100) -> int:
+        """Round quantity to nearest 100 (lot size), minimum 100."""
+        rounded = max(min_qty, round(qty / 100) * 100)
+        return min(500, rounded)  # Cap at max order size of 500
+    
+    def _get_opposite_order(self, order: Dict, bid: float, ask: float, regime_config: Dict) -> Optional[Dict]:
+        """
+        Generate an opposite-side order for two-sided quoting.
+        If the primary order is BUY, generate a SELL; if SELL, generate a BUY.
+        """
+        order_size = regime_config.get("order_size", 100)
+        aggressive_join = regime_config.get("aggressive_join", True)
+        spread = ask - bid
+        
+        if order["side"] == "BUY":
+            # Primary is BUY, add SELL at ask
+            if aggressive_join and spread > self.TICK_SIZE * 2:
+                price = round(ask - self.TICK_SIZE, 2)
+            else:
+                price = round(ask, 2)
+            return {"side": "SELL", "price": price, "qty": order_size}
+        else:
+            # Primary is SELL, add BUY at bid
+            if aggressive_join and spread > self.TICK_SIZE * 2:
+                price = round(bid + self.TICK_SIZE, 2)
+            else:
+                price = round(bid, 2)
+            return {"side": "BUY", "price": price, "qty": order_size}
     
     def _round_down_to_tick(self, price: float) -> float:
         """Round price down to tick size (for bids)."""
@@ -604,8 +640,8 @@ class TradingBot:
         if step % trade_freq != 0:
             return None
         
-        # Size based on inventory and config
-        qty = order_size if abs(inventory) < max_inv * 0.5 else int(order_size * 0.67)
+        # Size based on inventory and config - must be multiple of 100
+        qty = order_size if abs(inventory) < max_inv * 0.5 else self._round_qty_to_lot(int(order_size * 0.67))
         
         # Determine direction based on inventory
         inventory_threshold = max_inv * 0.15  # 15% of max inventory
@@ -867,11 +903,13 @@ class TradingBot:
         else:  # NORMAL
             order = self._normal_strategy(bid, ask, mid, self.inventory, self.current_step)
         
-        # Debug logging for first few trades
-        if order and self.orders_sent < 5:
-            print(f"[{self.student_id}] [DEBUG] Step {self.current_step}, Regime: {self.regime}, Order: {order}")
-        elif not order and self.current_step > self.CALIBRATION_STEPS and self.current_step % 100 == 0 and self.orders_sent == 0:
-            print(f"[{self.student_id}] [DEBUG] Step {self.current_step}, Regime: {self.regime}, No order (inv={self.inventory}, step%freq check)")
+        # Debug logging for first few trades - show market prices
+        if order and self.orders_sent < 10:
+            print(f"[{self.student_id}] [DEBUG] Step {self.current_step} | Bid: {bid:.2f} Ask: {ask:.2f} Spread: {spread:.4f} | "
+                  f"Regime: {self.regime} | Order: {order['side']} {order['qty']}@{order['price']:.2f}")
+        elif not order and self.current_step > self.CALIBRATION_STEPS and self.current_step % 500 == 0 and self.orders_sent < 5:
+            print(f"[{self.student_id}] [DEBUG] Step {self.current_step} | Bid: {bid:.2f} Ask: {ask:.2f} | "
+                  f"Regime: {self.regime} | No order (inv={self.inventory})")
         
         return order
     
