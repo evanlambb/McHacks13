@@ -6,6 +6,12 @@ Pluggable strategies to test different trading behaviors and market mechanics.
 
 from typing import Dict, Optional
 from abc import ABC, abstractmethod
+import sys
+import os
+
+# Add parent directory to path to import strategies
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from strategies.router import StrategyRouter
 
 
 class ExperimentStrategy(ABC):
@@ -245,4 +251,36 @@ class InventoryManager(ExperimentStrategy):
             elif inventory < -self.threshold:
                 return {"side": "BUY", "price": round(ask, 2), "qty": self.qty}
         return None
+
+
+class RouterStrategy(ExperimentStrategy):
+    """
+    Wrapper strategy that uses the StrategyRouter with regime classification.
+    Uses default depth values since ExperimentStrategy interface doesn't provide book data.
+    """
+    
+    def __init__(self):
+        super().__init__("router_strategy")
+        self.router = StrategyRouter()
+        # Default depth values (will be approximate)
+        self.default_bid_depth = 1000
+        self.default_ask_depth = 1000
+    
+    def decide_order(self, bid: float, ask: float, mid: float, inventory: int, step: int) -> Optional[Dict]:
+        """
+        Delegate to StrategyRouter.
+        
+        Note: Uses default depth values since ExperimentStrategy interface
+        doesn't provide full book data. For accurate depth, use DataCollectorBot
+        directly with student_algorithm.py which has full book access.
+        """
+        return self.router.decide_order(
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            inventory=inventory,
+            step=step,
+            bid_depth=self.default_bid_depth,
+            ask_depth=self.default_ask_depth
+        )
 

@@ -22,6 +22,9 @@ from typing import Dict, Optional
 # Suppress SSL warnings for self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Import strategy router
+from strategies.router import StrategyRouter
+
 
 class TradingBot:
     """
@@ -56,6 +59,13 @@ class TradingBot:
         self.last_bid = 0.0
         self.last_ask = 0.0
         self.last_mid = 0.0
+        
+        # Store full order book data
+        self.last_bids = []
+        self.last_asks = []
+        
+        # Strategy router
+        self.router = StrategyRouter()
         
         # WebSocket connections
         self.market_ws = None
@@ -179,6 +189,15 @@ class TradingBot:
             self.last_bid = data.get("bid", 0.0)
             self.last_ask = data.get("ask", 0.0)
             
+            # Capture full order book if available
+            if data.get("type") in ["MARKET_DATA", "SNAPSHOT"] or "bids" in data:
+                self.last_bids = data.get("bids", [])
+                self.last_asks = data.get("asks", [])
+            else:
+                # If full book not available, create minimal book from best bid/ask
+                self.last_bids = [{"price": self.last_bid, "qty": 0}] if self.last_bid > 0 else []
+                self.last_asks = [{"price": self.last_ask, "qty": 0}] if self.last_ask > 0 else []
+            
             # Log progress every 500 steps with latency stats
             if self.current_step % 500 == 0 and self.step_latencies:
                 avg_lat = sum(self.step_latencies[-100:]) / min(len(self.step_latencies), 100)
@@ -237,32 +256,20 @@ class TradingBot:
         if mid <= 0 or bid <= 0 or ask <= 0:
             return None
         
-        # =================================================================
-        # EXAMPLE STRATEGY: Conservative trading
-        # 
-        # - Cross the spread aggressively to get fills
-        # - Manage inventory by alternating buy/sell
-        # =================================================================
+        # Calculate book depth
+        bid_depth = sum(b.get("qty", 0) for b in self.last_bids) if self.last_bids else 1000
+        ask_depth = sum(a.get("qty", 0) for a in self.last_asks) if self.last_asks else 1000
         
-        # Only trade every 50 steps to avoid hitting order limits
-        if self.current_step % 50 != 0:
-            return None
-        
-        # If we're too long, sell aggressively (hit the bid)
-        if self.inventory > 200:
-            return {"side": "SELL", "price": round(bid, 2), "qty": 100}
-        
-        # If we're too short, buy aggressively (lift the offer)
-        elif self.inventory < -200:
-            return {"side": "BUY", "price": round(ask, 2), "qty": 100}
-        
-        # Otherwise, alternate buy/sell to demonstrate trading
-        elif (self.current_step // 50) % 2 == 0:
-            # Buy aggressively (cross the spread)
-            return {"side": "BUY", "price": round(ask, 2), "qty": 100}
-        else:
-            # Sell aggressively (cross the spread)
-            return {"side": "SELL", "price": round(bid, 2), "qty": 100}
+        # Delegate to strategy router
+        return self.router.decide_order(
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            inventory=self.inventory,
+            step=self.current_step,
+            bid_depth=bid_depth,
+            ask_depth=ask_depth
+        )
     
     # =========================================================================
     # ORDER HANDLING
