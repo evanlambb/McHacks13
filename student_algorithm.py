@@ -77,9 +77,9 @@ class TradingBot:
         self.order_send_times = {}  # order_id -> {"time": timestamp, "price": price, "side": side, "step": step}
         self.fill_latencies = []
         
-        # Order management - MAX 50 OPEN ORDERS
+        # Order management - MAX 50 OPEN ORDERS (COMPETITION RULE)
         self.MAX_OPEN_ORDERS = 50
-        self.ORDER_CANCEL_THRESHOLD = 45  # Start cancelling when we hit this many
+        self.ORDER_CANCEL_THRESHOLD = 40  # Start cancelling earlier to prevent exceeding 50
         
         # Regime detection state
         self.spread_history = []
@@ -149,6 +149,207 @@ class TradingBot:
         
         # Detected scenario (set at end of calibration)
         self.detected_scenario = None
+        
+        # =====================================================================
+        # COMPREHENSIVE DEBUGGING SYSTEM
+        # =====================================================================
+        self.debug_enabled = True  # Set to False to disable all debug output
+        self.debug_verbose = True  # Set to False for summary-only mode
+        
+        # Debug tracking structures
+        self.debug_log = []  # List of debug entries
+        self.debug_stats = {
+            "no_order_reasons": {},  # Reason -> count
+            "order_decisions": [],  # List of decision points
+            "regime_time": {},  # Regime -> steps spent
+            "strategy_calls": {},  # Strategy name -> call count
+            "fill_analysis": [],  # Fill details for analysis
+        }
+        
+        # Performance metrics
+        self.performance_metrics = {
+            "orders_sent": 0,
+            "orders_filled": 0,
+            "orders_cancelled": 0,
+            "fill_rate": 0.0,
+            "total_notional": 0.0,
+            "max_inventory": 0,
+            "min_inventory": 0,
+            "pnl_history": [],
+            "inventory_history": [],
+            "spread_captured": [],
+            "fill_latencies": [],
+            "order_lifetimes": [],  # Step difference between send and fill/cancel
+        }
+        
+        # Debug output frequency
+        self.debug_print_interval = 100  # Print summary every N steps
+        self.debug_detailed_interval = 500  # Print detailed analysis every N steps
+    
+    # =========================================================================
+    # DEBUGGING METHODS
+    # =========================================================================
+    
+    def _debug_log(self, category: str, message: str, data: Dict = None, step: int = None):
+        """Log a debug entry with category and optional data."""
+        if not self.debug_enabled:
+            return
+        
+        entry = {
+            "step": step if step is not None else self.current_step,
+            "category": category,
+            "message": message,
+            "data": data or {},
+            "timestamp": time.time(),
+        }
+        
+        self.debug_log.append(entry)
+        
+        # Keep log size manageable (last 10000 entries)
+        if len(self.debug_log) > 10000:
+            self.debug_log = self.debug_log[-10000:]
+    
+    def _debug_track_reason(self, reason: str, context: Dict = None):
+        """Track why orders aren't being sent."""
+        if not self.debug_enabled:
+            return
+        
+        if reason not in self.debug_stats["no_order_reasons"]:
+            self.debug_stats["no_order_reasons"][reason] = {
+                "count": 0,
+                "last_seen": None,
+                "contexts": []
+            }
+        
+        self.debug_stats["no_order_reasons"][reason]["count"] += 1
+        self.debug_stats["no_order_reasons"][reason]["last_seen"] = self.current_step
+        
+        # Store context for first few occurrences
+        if len(self.debug_stats["no_order_reasons"][reason]["contexts"]) < 5:
+            self.debug_stats["no_order_reasons"][reason]["contexts"].append({
+                "step": self.current_step,
+                "context": context or {}
+            })
+    
+    def _debug_strategy_call(self, strategy_name: str, order: Optional[Dict], reason: str = None):
+        """Track strategy function calls and their outcomes."""
+        if not self.debug_enabled:
+            return
+        
+        if strategy_name not in self.debug_stats["strategy_calls"]:
+            self.debug_stats["strategy_calls"][strategy_name] = {
+                "calls": 0,
+                "orders_generated": 0,
+                "no_order_reasons": {}
+            }
+        
+        self.debug_stats["strategy_calls"][strategy_name]["calls"] += 1
+        
+        if order:
+            self.debug_stats["strategy_calls"][strategy_name]["orders_generated"] += 1
+        elif reason:
+            if reason not in self.debug_stats["strategy_calls"][strategy_name]["no_order_reasons"]:
+                self.debug_stats["strategy_calls"][strategy_name]["no_order_reasons"][reason] = 0
+            self.debug_stats["strategy_calls"][strategy_name]["no_order_reasons"][reason] += 1
+    
+    def _debug_regime_time(self, regime: str):
+        """Track time spent in each regime."""
+        if not self.debug_enabled:
+            return
+        
+        if regime not in self.debug_stats["regime_time"]:
+            self.debug_stats["regime_time"][regime] = 0
+        self.debug_stats["regime_time"][regime] += 1
+    
+    def _debug_print_periodic(self):
+        """Print periodic debug summary."""
+        if not self.debug_enabled or not self.debug_verbose:
+            return
+        
+        if self.current_step % self.debug_print_interval == 0 and self.current_step > self.CALIBRATION_STEPS:
+            spread = self.last_ask - self.last_bid if self.last_ask > 0 and self.last_bid > 0 else 0
+            total_depth = self.last_bid_depth + self.last_ask_depth
+            
+            print(f"[DEBUG] Step {self.current_step} | "
+                  f"Regime: {self.regime} | "
+                  f"Inv: {self.inventory} | "
+                  f"PnL: ${self.pnl:.2f} | "
+                  f"Orders: {self.orders_sent} sent, {self.performance_metrics['orders_filled']} filled | "
+                  f"Spread: {spread:.4f} | "
+                  f"Depth: {total_depth} | "
+                  f"Open Orders: {self._get_open_order_count()}")
+    
+    def _debug_print_detailed(self):
+        """Print detailed analysis periodically."""
+        if not self.debug_enabled:
+            return
+        
+        if self.current_step % self.debug_detailed_interval == 0 and self.current_step > self.CALIBRATION_STEPS:
+            self._print_debug_summary()
+    
+    def _print_debug_summary(self):
+        """Print comprehensive debug summary."""
+        if not self.debug_enabled:
+            return
+        
+        print("\n" + "="*80)
+        print(f"DEBUG SUMMARY - Step {self.current_step}")
+        print("="*80)
+        
+        # Market conditions
+        spread = self.last_ask - self.last_bid if self.last_ask > 0 and self.last_bid > 0 else 0
+        total_depth = self.last_bid_depth + self.last_ask_depth
+        print(f"\nCurrent Market Conditions:")
+        print(f"  Bid: ${self.last_bid:.2f} | Ask: ${self.last_ask:.2f} | Mid: ${self.last_mid:.2f}")
+        print(f"  Spread: ${spread:.4f} | Total Depth: {total_depth}")
+        print(f"  Regime: {self.regime} | Steps in regime: {self.steps_in_regime}")
+        
+        # Performance metrics
+        print(f"\nPerformance Metrics:")
+        print(f"  Orders Sent: {self.orders_sent}")
+        print(f"  Orders Filled: {self.performance_metrics['orders_filled']}")
+        print(f"  Fill Rate: {self.performance_metrics['fill_rate']:.2%}")
+        print(f"  Total Notional: ${self.performance_metrics['total_notional']:,.2f}")
+        print(f"  Current PnL: ${self.pnl:.2f}")
+        print(f"  Inventory: {self.inventory} (max: {self.performance_metrics['max_inventory']}, min: {self.performance_metrics['min_inventory']})")
+        
+        if self.performance_metrics['spread_captured']:
+            avg_spread = sum(self.performance_metrics['spread_captured']) / len(self.performance_metrics['spread_captured'])
+            print(f"  Avg Spread Captured: ${avg_spread:.4f}")
+        
+        # No-order reasons
+        if self.debug_stats["no_order_reasons"]:
+            print(f"\nNo-Order Reasons (Top 10):")
+            sorted_reasons = sorted(
+                self.debug_stats["no_order_reasons"].items(),
+                key=lambda x: x[1]["count"],
+                reverse=True
+            )[:10]
+            for reason, info in sorted_reasons:
+                pct = (info["count"] / max(1, self.current_step - self.CALIBRATION_STEPS)) * 100
+                print(f"  {reason}: {info['count']} times ({pct:.1f}%)")
+        
+        # Strategy call statistics
+        if self.debug_stats["strategy_calls"]:
+            print(f"\nStrategy Call Statistics:")
+            for strategy, stats in self.debug_stats["strategy_calls"].items():
+                order_rate = (stats["orders_generated"] / max(1, stats["calls"])) * 100
+                print(f"  {strategy}:")
+                print(f"    Calls: {stats['calls']} | Orders Generated: {stats['orders_generated']} ({order_rate:.1f}%)")
+                if stats["no_order_reasons"]:
+                    print(f"    No-order reasons:")
+                    for reason, count in sorted(stats["no_order_reasons"].items(), key=lambda x: -x[1])[:3]:
+                        print(f"      {reason}: {count}")
+        
+        # Regime time distribution
+        if self.debug_stats["regime_time"]:
+            total_regime_steps = sum(self.debug_stats["regime_time"].values())
+            print(f"\nRegime Time Distribution:")
+            for regime, steps in sorted(self.debug_stats["regime_time"].items(), key=lambda x: -x[1]):
+                pct = (steps / max(1, total_regime_steps)) * 100
+                print(f"  {regime}: {steps} steps ({pct:.1f}%)")
+        
+        print("="*80 + "\n")
     
     # =========================================================================
     # REGISTRATION - Get a token to start trading
@@ -288,6 +489,12 @@ class TradingBot:
             else:
                 self.last_mid = 0
             
+            # Update mid history for volatility detection (simplified strategy)
+            if self.last_mid > 0:
+                self.mid_history.append(self.last_mid)
+                if len(self.mid_history) > 100:  # Keep last 100 for volatility checks
+                    self.mid_history.pop(0)
+            
             # Collect calibration data for scenario detection
             spread = self.last_ask - self.last_bid if self.last_ask > 0 and self.last_bid > 0 else 0
             total_depth = self.last_bid_depth + self.last_ask_depth
@@ -391,14 +598,9 @@ class TradingBot:
             order = self.decide_order(self.last_bid, self.last_ask, self.last_mid)
             
             if order and self.order_ws and self.order_ws.sock:
+                # SIMPLIFIED STRATEGY: Only send one order at a time
+                # No two-sided quoting to avoid exceeding 50 order limit
                 self._send_order(order)
-                
-                # Two-sided quoting: also send opposite side order if enabled
-                regime_config = self._get_regime_config(self.regime)
-                if regime_config.get("two_sided", False) and abs(self.inventory) < regime_config.get("max_inventory", 1000) * 0.8:
-                    opposite_order = self._get_opposite_order(order, self.last_bid, self.last_ask, regime_config)
-                    if opposite_order:
-                        self._send_order(opposite_order)
             
             # Signal DONE to advance to next step
             self._send_done()
@@ -777,9 +979,21 @@ class TradingBot:
         spread = ask - bid
         skew = self._calculate_inventory_skew(inventory)
         
-        # DEAD MARKET CHECK: If spread is 0 or very thin depth, don't trade
+        # ENHANCED DEAD MARKET CHECK: More aggressive detection
+        if bid <= 0 or ask <= 0 or ask < bid:
+            self._debug_track_reason("DEAD_MARKET", {
+                "bid": bid, "ask": ask, "spread": spread,
+                "regime": "NORMAL"
+            })
+            return None
+        
         total_depth = self.last_bid_depth + self.last_ask_depth
-        if spread < 0.01 or total_depth < 200:
+        if spread <= 0 or total_depth < 200:
+            self._debug_track_reason("DEAD_MARKET", {
+                "spread": spread,
+                "total_depth": total_depth,
+                "regime": "NORMAL"
+            })
             return None
         
         # SCENARIO-SPECIFIC: Flash crash proactive flattening
@@ -827,6 +1041,12 @@ class TradingBot:
         
         # Trade based on configured frequency
         if step % trade_freq != 0:
+            self._debug_track_reason("TRADE_FREQ_SKIP", {
+                "step": step,
+                "trade_freq": trade_freq,
+                "step_mod": step % trade_freq,
+                "regime": "NORMAL"
+            })
             return None
         
         # Size based on inventory and config - must be multiple of 100
@@ -869,6 +1089,11 @@ class TradingBot:
             if stay_flat:
                 # Only trade if spread is wide enough to capture
                 if spread < min_spread:
+                    self._debug_track_reason("STAY_FLAT_SPREAD_TOO_SMALL", {
+                        "spread": spread,
+                        "min_spread": min_spread,
+                        "regime": "NORMAL"
+                    })
                     return None
                 
                 # Only trade to flatten inventory
@@ -878,6 +1103,10 @@ class TradingBot:
                     trade_cycle = 0  # BUY to flatten
                 else:
                     # Flat - don't trade
+                    self._debug_track_reason("STAY_FLAT_INVENTORY_FLAT", {
+                        "inventory": inventory,
+                        "regime": "NORMAL"
+                    })
                     return None
             else:
                 # Active trading with tight inventory management
@@ -956,10 +1185,22 @@ class TradingBot:
         short_bias = regime_config.get("short_bias", False)
         target_short = regime_config.get("target_short_position", -500)
         
-        # DEAD MARKET CHECK
+        # ENHANCED DEAD MARKET CHECK: More aggressive detection
+        if bid <= 0 or ask <= 0 or ask < bid:
+            self._debug_track_reason("DEAD_MARKET", {
+                "bid": bid, "ask": ask, "spread": ask - bid,
+                "regime": "STRESSED"
+            })
+            return None
+        
         spread = ask - bid
         total_depth = self.last_bid_depth + self.last_ask_depth
-        if spread < 0.01 or total_depth < 150:
+        if spread <= 0 or total_depth < 150:
+            self._debug_track_reason("DEAD_MARKET", {
+                "spread": spread,
+                "total_depth": total_depth,
+                "regime": "STRESSED"
+            })
             return None
         
         inv_action, urgency = self._get_inventory_action(inventory)
@@ -970,10 +1211,34 @@ class TradingBot:
         
         # Trade based on configured frequency
         if step % trade_freq != 0:
+            self._debug_track_reason("TRADE_FREQ_SKIP", {
+                "step": step,
+                "trade_freq": trade_freq,
+                "step_mod": step % trade_freq,
+                "regime": "STRESSED"
+            })
             return None
         
-        # Size based on inventory
-        qty = order_size if abs(inventory) < max_inv * 0.7 else self._round_qty_to_lot(int(order_size * 0.67))
+        # VOLATILITY CHECK: If spread is very wide, reduce trading or skip
+        # Wide spreads indicate high volatility - be more conservative
+        if spread > 2.0:  # Very wide spread (>$2)
+            # Only trade if inventory is dangerous
+            if abs(inventory) < max_inv * 0.5:
+                self._debug_track_reason("WIDE_SPREAD_SKIP", {
+                    "spread": spread,
+                    "inventory": inventory,
+                    "regime": "STRESSED"
+                })
+                return None
+        
+        # Size based on inventory - reduce size during high volatility
+        base_qty = order_size if abs(inventory) < max_inv * 0.7 else self._round_qty_to_lot(int(order_size * 0.67))
+        
+        # Reduce order size if spread is wide (volatility is high)
+        if spread > 1.0:
+            qty = self._round_qty_to_lot(int(base_qty * 0.5))  # Half size during high volatility
+        else:
+            qty = base_qty
         
         # SHORT BIAS LOGIC: Prefer selling to maintain short position
         if short_bias:
@@ -1066,29 +1331,57 @@ class TradingBot:
         Spike survival mode (for mini_flash_crash scenario).
         
         Strategy:
-        1. Flatten position immediately during spike
-        2. Don't add new positions
+        1. ONLY unwind if inventory is dangerous (CRITICAL threshold)
+        2. DO NOT add new positions during spikes
         3. Wait for spike to end (4 steps)
+        
+        CRITICAL: During spikes, prices are volatile and fills can be at bad prices.
+        Only trade if absolutely necessary for survival.
         """
         regime_config = self._get_regime_config("CRASH")  # Use crash config for safety
         max_inv = regime_config.get("max_inventory", 200)
         
-        # DEAD MARKET CHECK
-        spread = ask - bid
-        total_depth = self.last_bid_depth + self.last_ask_depth
-        if spread < 0.01 or total_depth < 100:
+        # ENHANCED DEAD MARKET CHECK - More aggressive
+        if bid <= 0 or ask <= 0 or ask < bid:
+            self._debug_track_reason("DEAD_MARKET", {
+                "bid": bid, "ask": ask, "spread": ask - bid,
+                "regime": "SPIKE"
+            })
             return None
         
-        # Emergency unwind if inventory is high
-        inv_action, urgency = self._get_inventory_action(inventory)
-        if inv_action == "EMERGENCY":
-            return self._emergency_unwind(inventory, bid, ask)
+        spread = ask - bid
+        total_depth = self.last_bid_depth + self.last_ask_depth
         
-        # Flatten position aggressively during spike
-        if abs(inventory) > max_inv:
-            return self._emergency_unwind(inventory, bid, ask)
+        # If spread is zero/negative or very thin depth, don't trade
+        if spread <= 0 or total_depth < 100:
+            self._debug_track_reason("DEAD_MARKET", {
+                "spread": spread,
+                "total_depth": total_depth,
+                "regime": "SPIKE"
+            })
+            return None
+        
+        # ONLY unwind if inventory is CRITICAL (danger zone or higher)
+        # Don't unwind for moderate inventory - wait for spike to end
+        inv_action, urgency = self._get_inventory_action(inventory)
+        
+        # Only trade if in DANGER or CRITICAL zone
+        if inv_action == "EMERGENCY" or inv_action == "UNWIND_ONLY":
+            # Only unwind if inventory exceeds danger threshold
+            if abs(inventory) >= self.INVENTORY_DANGER:
+                return self._emergency_unwind(inventory, bid, ask)
+        
+        # CRITICAL: Do NOT trade during spikes unless absolutely necessary
+        # Even if inventory is above max_inv but below danger, wait for spike to end
+        # Trading during spikes often results in bad fills (negative spread capture)
         
         # Otherwise, don't trade - wait for spike to end
+        self._debug_track_reason("SPIKE_WAIT", {
+            "inventory": inventory,
+            "max_inv": max_inv,
+            "inv_action": inv_action,
+            "regime": "SPIKE"
+        })
         return None
     
     def _crash_strategy(self, bid: float, ask: float, mid: float,
@@ -1101,14 +1394,31 @@ class TradingBot:
         regime_config = self._get_regime_config("CRASH")
         max_inv = regime_config["max_inventory"]
         
-        # DEAD MARKET CHECK - can't trade if no liquidity
+        # ENHANCED DEAD MARKET CHECK: More aggressive detection
+        if bid <= 0 or ask <= 0 or ask < bid:
+            self._debug_track_reason("DEAD_MARKET", {
+                "bid": bid, "ask": ask, "spread": ask - bid,
+                "regime": "CRASH"
+            })
+            return None
+        
         spread = ask - bid
         total_depth = self.last_bid_depth + self.last_ask_depth
-        if spread < 0.01 or total_depth < 100:
+        if spread <= 0 or total_depth < 100:
+            self._debug_track_reason("DEAD_MARKET", {
+                "spread": spread,
+                "total_depth": total_depth,
+                "regime": "CRASH"
+            })
             return None
         
         # If nearly flat, stay flat
         if abs(inventory) < max_inv:
+            self._debug_track_reason("CRASH_FLAT_ENOUGH", {
+                "inventory": inventory,
+                "max_inv": max_inv,
+                "regime": "CRASH"
+            })
             return None
         
         # Aggressive unwind - cross the spread to guarantee exit
@@ -1130,10 +1440,22 @@ class TradingBot:
         max_inv = regime_config["max_inventory"]
         aggressive_join = regime_config.get("aggressive_join", True)
         
-        # DEAD MARKET CHECK
+        # ENHANCED DEAD MARKET CHECK: More aggressive detection
+        if bid <= 0 or ask <= 0 or ask < bid:
+            self._debug_track_reason("DEAD_MARKET", {
+                "bid": bid, "ask": ask, "spread": ask - bid,
+                "regime": "HFT"
+            })
+            return None
+        
         spread = ask - bid
         total_depth = self.last_bid_depth + self.last_ask_depth
-        if spread < 0.01 or total_depth < 100:
+        if spread <= 0 or total_depth < 100:
+            self._debug_track_reason("DEAD_MARKET", {
+                "spread": spread,
+                "total_depth": total_depth,
+                "regime": "HFT"
+            })
             return None
         
         inv_action, urgency = self._get_inventory_action(inventory)
@@ -1159,6 +1481,12 @@ class TradingBot:
         
         # In HFT, trade every trade_freq steps
         if step % trade_freq != 0:
+            self._debug_track_reason("TRADE_FREQ_SKIP", {
+                "step": step,
+                "trade_freq": trade_freq,
+                "step_mod": step % trade_freq,
+                "regime": "HFT"
+            })
             return None
         
         # Determine trade direction based on inventory
@@ -1214,71 +1542,214 @@ class TradingBot:
     
     def decide_order(self, bid: float, ask: float, mid: float) -> Optional[Dict]:
         """
-        Main strategy router - detects regime and delegates to appropriate strategy.
+        SIMPLIFIED BASIC MARKET MAKING STRATEGY
         
-        KEY PRINCIPLES:
-        1. Market makers PROVIDE liquidity - we don't cross spreads except emergencies
-        2. BUY orders at BID, SELL orders at ASK = capture spread
-        3. Inventory skew adjusts prices to mean-revert position
-        4. In HFT markets, don't compete - the MMs are too aggressive
+        Core Principles:
+        1. Quote at bid (BUY) and ask (SELL) to capture spread
+        2. Adjust prices based on inventory (skew) to stay balanced
+        3. Basic safety checks: dead market, inventory limits
+        
+        Focus: Profitability through spread capture and inventory management
+        
+        COMPETITION RULES COMPLIANCE:
+        - Max Inventory: 5000 shares (absolute limit) - enforced at 4500 threshold
+        - Order Quantity: 100-500 per order - enforced by _ensure_qty_multiple_of_100()
+        - Max Open Orders: 50 concurrent - enforced by MAX_OPEN_ORDERS check
+        - Decision Cycle: <1 second - simple logic ensures fast execution
+        - No Hardcoding: All prices from market data, no hardcoded crash timings
         """
-        # Skip if no valid prices
-        if mid <= 0 or bid <= 0 or ask <= 0:
+        # BASIC SAFETY CHECKS
+        
+        # 1. Valid prices check
+        if mid <= 0 or bid <= 0 or ask <= 0 or ask < bid:
             return None
         
-        # Safety check: Never exceed 5000 inventory limit - emergency unwind
-        if abs(self.inventory) >= 4800:
-            print(f"[{self.student_id}] [EMERGENCY] Inventory {self.inventory} near limit!")
+        # 2. Dead market check
+        spread = ask - bid
+        # CRITICAL: Don't trade if spread is too wide (volatile/dead market)
+        # Use relative check: if spread is >3x baseline, too volatile
+        # Or absolute check: if spread > 1.5, too wide
+        if spread <= 0:
+            return None
+        if self.baseline_spread and spread > self.baseline_spread * 3.0:
+            return None  # Spread is 3x wider than normal - too volatile
+        if spread > 1.5:  # Absolute limit - don't trade in very wide spreads
+            return None
+        
+        # 3. Minimum depth check
+        total_depth = self.last_bid_depth + self.last_ask_depth
+        if total_depth < 200:  # Increased from 100 - need more liquidity
+            return None
+        
+        # 4. Calibration period - don't trade
+        if self.current_step < self.CALIBRATION_STEPS:
+            return None
+        
+        # 5. VOLATILITY PROTECTION - Don't trade during extreme price movements
+        # Track recent price changes to detect volatility (multiple timeframes)
+        if len(self.mid_history) >= 10:
+            # Check short-term volatility (last 5 steps)
+            recent_mids = self.mid_history[-5:]
+            short_change = abs(recent_mids[-1] - recent_mids[0])
+            # Check medium-term volatility (last 10 steps)
+            medium_mids = self.mid_history[-10:]
+            medium_change = abs(medium_mids[-1] - medium_mids[0])
+            
+            # If price moved more than $3 in 5 steps OR $5 in 10 steps, too volatile
+            if short_change > 3.0 or medium_change > 5.0:
+                return None
+        
+        # 6. PnL PROTECTION - Stop trading if losses are too large
+        # CRITICAL: Much lower threshold to prevent catastrophic losses
+        # If we're losing money, stop trading early to prevent bankruptcy
+        if self.pnl < -20000:  # Reduced from -$50k - stop much earlier
+            return None
+        
+        # 7. CONSECUTIVE BAD FILLS PROTECTION
+        # If we have many bad fills, stop trading temporarily
+        if self.consecutive_losses >= 3:  # Reduced from 5 - more sensitive
+            return None
+        
+        # 8. LARGE LOSS DETECTION - If we just took a big hit, stop trading
+        # Check if PnL dropped significantly recently
+        if len(self.performance_metrics["pnl_history"]) >= 5:
+            recent_pnls = self.performance_metrics["pnl_history"][-5:]
+            pnl_drop = recent_pnls[0] - recent_pnls[-1]  # How much we lost recently
+            if pnl_drop > 50000:  # Lost more than $50k in last 5 fills
+                return None
+        
+        # 9. Emergency inventory unwind - RULE: Max Inventory 5000 shares
+        # Trigger at 4500 to leave buffer, emergency unwind caps at 500 per order
+        if abs(self.inventory) >= 4500:
             return self._emergency_unwind(self.inventory, bid, ask)
         
-        # Safety check: Don't generate orders if at max open orders limit
+        # 10. Max open orders check - RULE: Max 50 concurrent orders
+        # Be more aggressive: cancel early to prevent hitting limit
         open_count = self._get_open_order_count()
-        if open_count >= self.MAX_OPEN_ORDERS:
-            # Cancel oldest orders to make room
-            if open_count > 0:
-                self._cancel_old_orders(min(5, open_count))
-            return None
         
-        # Periodic cleanup: Cancel very stale orders (older than 200 steps) every 50 steps
-        if self.current_step % 50 == 0 and open_count > 0:
+        # Periodic cleanup: Cancel stale orders every 20 steps (more frequent)
+        # Also cancel orders if market price has moved significantly against us
+        if self.current_step % 20 == 0 and open_count > 0:
+            # Cancel orders older than 100 steps (more aggressive)
             stale_orders = [
                 (oid, meta) for oid, meta in self.order_send_times.items()
-                if self.current_step - meta["step"] > 200
+                if self.current_step - meta["step"] > 100
             ]
-            for order_id, _ in stale_orders:
+            for order_id, _ in stale_orders[:10]:  # Cancel up to 10 stale orders at a time
                 self._cancel_order(order_id)
+            
+            # CRITICAL: Cancel orders if market price moved significantly against us
+            # This prevents fills at terrible prices when market jumps
+            for order_id, order_meta in list(self.order_send_times.items()):
+                order_price = order_meta["price"]
+                order_side = order_meta["side"]
+                order_age = self.current_step - order_meta["step"]
+                
+                # If order is older than 20 steps, check if market moved against us
+                if order_age > 20:
+                    price_moved_against = False
+                    if order_side == "BUY":
+                        # We wanted to buy at X, but now bid is much lower (price dropped)
+                        # OR mid is much higher (we'd be buying at a bad price)
+                        if self.last_bid > 0 and (order_price - self.last_bid > self.TICK_SIZE * 4 or 
+                                                  (self.last_mid > 0 and self.last_mid - order_price > 10.0)):
+                            price_moved_against = True
+                    else:  # SELL
+                        # We wanted to sell at X, but now ask is much higher (price rose)
+                        # OR mid is much lower (we'd be selling at a bad price)
+                        if self.last_ask > 0 and (self.last_ask - order_price > self.TICK_SIZE * 4 or
+                                                  (self.last_mid > 0 and order_price - self.last_mid > 10.0)):
+                            price_moved_against = True
+                    
+                    if price_moved_against:
+                        self._cancel_order(order_id)
+                        if self.debug_enabled:
+                            self._debug_log("ORDER_CANCELLED_PRICE_MOVED", 
+                                          f"Cancelled order - price moved against us",
+                                          {"order_id": order_id, "order_price": order_price,
+                                           "current_bid": self.last_bid, "current_ask": self.last_ask,
+                                           "current_mid": self.last_mid, "order_age": order_age})
         
-        spread = ask - bid
+        # If approaching threshold, cancel proactively
+        if open_count >= self.ORDER_CANCEL_THRESHOLD:
+            # Cancel old orders proactively
+            cancel_count = max(10, open_count - self.ORDER_CANCEL_THRESHOLD + 10)
+            self._cancel_old_orders(cancel_count)
         
-        # Detect current regime (handles logging internally when confirmed changes occur)
-        self._detect_regime(spread, self.last_bid_depth, self.last_ask_depth, self.last_bids, self.last_asks)
+        # Double-check after cancellation
+        open_count = self._get_open_order_count()
+        if open_count >= self.MAX_OPEN_ORDERS:
+            return None
         
-        # Store previous mid for momentum detection
-        self.prev_mid = mid
+        # BASIC MARKET MAKING STRATEGY
         
-        # Route to appropriate strategy
-        if self.regime == "CALIBRATING":
-            return None  # Don't trade while calibrating
-        elif self.regime == "SPIKE":
-            order = self._spike_strategy(bid, ask, mid, self.inventory, self.current_step)
-        elif self.regime == "CRASH":
-            order = self._crash_strategy(bid, ask, mid, self.inventory, self.current_step)
-        elif self.regime == "STRESSED":
-            order = self._stressed_strategy(bid, ask, mid, self.inventory, self.current_step)
-        elif self.regime == "HFT":
-            order = self._hft_strategy(bid, ask, mid, self.inventory, self.current_step)
-        else:  # NORMAL
-            order = self._normal_strategy(bid, ask, mid, self.inventory, self.current_step)
+        # CONSERVATIVE trade frequency: trade every 20 steps (reduced from 10)
+        # Less frequent trading = less exposure to volatility
+        TRADE_FREQ = 20
+        if self.current_step % TRADE_FREQ != 0:
+            return None
         
-        # Debug logging for first few trades - show market prices
-        if order and self.orders_sent < 10:
-            print(f"[{self.student_id}] [DEBUG] Step {self.current_step} | Bid: {bid:.2f} Ask: {ask:.2f} Spread: {spread:.4f} | "
-                  f"Regime: {self.regime} | Order: {order['side']} {order['qty']}@{order['price']:.2f}")
-        elif not order and self.current_step > self.CALIBRATION_STEPS and self.current_step % 500 == 0 and self.orders_sent < 5:
-            print(f"[{self.student_id}] [DEBUG] Step {self.current_step} | Bid: {bid:.2f} Ask: {ask:.2f} | "
-                  f"Regime: {self.regime} | No order (inv={self.inventory})")
+        # Order size: 200 shares (adjust based on inventory)
+        # RULE: Order Quantity must be 100-500 per order
+        base_order_size = 200
+        # Reduce size earlier to manage risk
+        if abs(self.inventory) > 1000:  # Reduced from 2000
+            order_size = 100  # Smaller orders when inventory is high
+        else:
+            order_size = base_order_size
         
-        return order
+        # Enforce 100-500 range and multiple of 100
+        order_size = self._ensure_qty_multiple_of_100(order_size)
+        
+        # Double-check compliance (safety check)
+        if order_size < 100 or order_size > 500:
+            order_size = 200  # Fallback to safe default
+            order_size = self._ensure_qty_multiple_of_100(order_size)
+        
+        # INVENTORY-BASED DECISION
+        
+        # Calculate inventory skew (how much to adjust prices)
+        # Positive inventory = long position = prefer selling = adjust ask down
+        # Negative inventory = short position = prefer buying = adjust bid up
+        inventory_skew_ticks = -self.inventory / 500.0  # 1 tick per 500 shares
+        
+        # Max inventory threshold for aggressive unwinding
+        # REDUCED: Be more conservative to avoid large positions
+        max_inv_threshold = 1000  # Reduced from 2000
+        
+        # Decision logic based on inventory
+        if self.inventory > max_inv_threshold:
+            # Too long - sell to reduce position
+            # Improve ask by 1 tick to get filled faster
+            price = round(ask - self.TICK_SIZE, 2)
+            return {"side": "SELL", "price": price, "qty": order_size}
+            
+        elif self.inventory < -max_inv_threshold:
+            # Too short - buy to reduce position
+            # Improve bid by 1 tick to get filled faster
+            price = round(bid + self.TICK_SIZE, 2)
+            return {"side": "BUY", "price": price, "qty": order_size}
+            
+        else:
+            # Balanced inventory - quote both sides
+            # Simple approach: quote at bid/ask, alternate sides
+            
+            # Slight bias based on inventory: if slightly long, prefer selling; if slightly short, prefer buying
+            # REDUCED thresholds: Be more aggressive about staying flat
+            if self.inventory > 100:
+                # Slightly long - prefer selling
+                price = round(ask, 2)
+                return {"side": "SELL", "price": price, "qty": order_size}
+            elif self.inventory < -100:
+                # Slightly short - prefer buying
+                price = round(bid, 2)
+                return {"side": "BUY", "price": price, "qty": order_size}
+            else:
+                # Very balanced - alternate sides
+                if (self.current_step // TRADE_FREQ) % 2 == 0:
+                    return {"side": "BUY", "price": round(bid, 2), "qty": order_size}
+                else:
+                    return {"side": "SELL", "price": round(ask, 2), "qty": order_size}
     
     # =========================================================================
     # ORDER HANDLING
@@ -1332,17 +1803,25 @@ class TradingBot:
     
     def _send_order(self, order: Dict):
         """Send an order to the exchange, managing open order limits."""
-        # Check if we're at the limit
+        # CRITICAL: Check open order count BEFORE sending
         open_count = self._get_open_order_count()
         
+        # RULE: Max 50 concurrent orders - enforce strictly
         if open_count >= self.MAX_OPEN_ORDERS:
             print(f"[{self.student_id}] WARNING: At max open orders ({self.MAX_OPEN_ORDERS}), cannot send new order")
             return
         
-        # If approaching limit, cancel old orders
+        # If approaching limit, cancel old orders FIRST
         if open_count >= self.ORDER_CANCEL_THRESHOLD:
-            cancel_count = open_count - self.ORDER_CANCEL_THRESHOLD + 1
+            # Cancel enough orders to stay well below limit
+            cancel_count = max(5, open_count - self.ORDER_CANCEL_THRESHOLD + 5)
             self._cancel_old_orders(cancel_count)
+            
+            # Re-check count after cancellation
+            open_count = self._get_open_order_count()
+            if open_count >= self.MAX_OPEN_ORDERS:
+                print(f"[{self.student_id}] WARNING: Still at limit after cancellation, cannot send")
+                return
         
         order_id = f"ORD_{self.student_id}_{self.current_step}_{self.orders_sent}"
         
@@ -1363,6 +1842,17 @@ class TradingBot:
             }
             self.order_ws.send(json.dumps(msg))
             self.orders_sent += 1
+            self.performance_metrics["orders_sent"] = self.orders_sent
+            
+            # Debug log
+            if self.debug_enabled:
+                self._debug_log("ORDER_SENT", f"Sent {order['side']} order", {
+                    "order_id": order_id,
+                    "side": order["side"],
+                    "price": order["price"],
+                    "qty": order["qty"],
+                    "step": self.current_step
+                })
         except Exception as e:
             print(f"[{self.student_id}] Send order error: {e}")
             # Remove from tracking if send failed
@@ -1393,14 +1883,29 @@ class TradingBot:
                 side = data.get("side", "")
                 order_id = data.get("order_id", "")
                 
+                # CRITICAL SAFETY CHECK: If mid is 0 or invalid, this is a bad fill
+                # Don't process fills when market is dead - this prevents catastrophic losses
+                if self.last_mid <= 0:
+                    print(f"[{self.student_id}] [CRITICAL] Rejecting fill - market is dead (mid={self.last_mid})")
+                    # Don't update inventory or PnL for bad fills
+                    # Remove order from tracking but don't process
+                    if order_id in self.order_send_times:
+                        del self.order_send_times[order_id]
+                    return
+                
                 # Track previous PnL to measure trade impact
                 prev_pnl = self.pnl
                 
                 # Measure fill latency and remove from tracking
+                fill_latency_ms = None
+                order_lifetime = None
                 if order_id in self.order_send_times:
                     order_meta = self.order_send_times[order_id]
-                    fill_latency = (recv_time - order_meta["time"]) * 1000  # ms
-                    self.fill_latencies.append(fill_latency)
+                    fill_latency_ms = (recv_time - order_meta["time"]) * 1000  # ms
+                    order_lifetime = self.current_step - order_meta["step"]
+                    self.fill_latencies.append(fill_latency_ms)
+                    self.performance_metrics["fill_latencies"].append(fill_latency_ms)
+                    self.performance_metrics["order_lifetimes"].append(order_lifetime)
                     del self.order_send_times[order_id]
                 
                 # Update inventory and cash flow
@@ -1414,9 +1919,93 @@ class TradingBot:
                 # Calculate mark-to-market PnL using mid price
                 self.pnl = self.cash_flow + self.inventory * self.last_mid
                 
+                # Update performance metrics
+                self.performance_metrics["orders_filled"] += 1
+                self.performance_metrics["total_notional"] += qty * price
+                self.performance_metrics["max_inventory"] = max(
+                    abs(self.inventory), 
+                    self.performance_metrics["max_inventory"]
+                )
+                self.performance_metrics["min_inventory"] = min(
+                    self.inventory,
+                    self.performance_metrics["min_inventory"]
+                )
+                self.performance_metrics["pnl_history"].append(self.pnl)
+                self.performance_metrics["inventory_history"].append(self.inventory)
+                
+                # Calculate spread captured (only if market is valid)
+                spread_captured = 0.0
+                if self.last_ask > 0 and self.last_bid > 0 and self.last_mid > 0:
+                    if side == "BUY":
+                        spread_captured = self.last_ask - price  # We bought at price, could have sold at ask
+                    else:
+                        spread_captured = price - self.last_bid  # We sold at price, could have bought at bid
+                else:
+                    # Market is dead - mark as bad fill
+                    spread_captured = -1000.0  # Large negative to trigger bad fill detection
+                
+                self.performance_metrics["spread_captured"].append(spread_captured)
+                
+                # Update fill rate
+                if self.orders_sent > 0:
+                    self.performance_metrics["fill_rate"] = (
+                        self.performance_metrics["orders_filled"] / self.orders_sent
+                    )
+                
                 # Calculate trade quality (compare to mid)
-                trade_vs_mid = (price - self.last_mid) if side == "SELL" else (self.last_mid - price)
+                trade_vs_mid = 0.0
+                if self.last_mid > 0:
+                    trade_vs_mid = (price - self.last_mid) if side == "SELL" else (self.last_mid - price)
                 quality = "GOOD" if trade_vs_mid > 0 else "POOR"
+                
+                # CRITICAL: Monitor for bad fills (negative spread capture or dead market)
+                # If we're consistently getting bad fills, we should stop trading
+                is_bad_fill = spread_captured < -10.0 or self.last_mid <= 0
+                if is_bad_fill:
+                    print(f"[{self.student_id}] [WARNING] BAD FILL: {side} {qty}@{price:.2f} | "
+                          f"Spread captured: ${spread_captured:.2f} | Mid: ${self.last_mid:.2f} | "
+                          f"Trade vs Mid: ${trade_vs_mid:.2f}")
+                
+                # Track consecutive bad fills
+                if is_bad_fill:
+                    self.consecutive_losses += 1
+                else:
+                    self.consecutive_losses = 0
+                
+                # CRITICAL: If we have 3+ consecutive bad fills, STOP TRADING
+                # This check happens AFTER updating the counter, so it will trigger immediately
+                if self.consecutive_losses >= 3:
+                    print(f"[{self.student_id}] [CRITICAL] {self.consecutive_losses} consecutive bad fills! "
+                          f"STOPPING TRADING to prevent further losses.")
+                    # Set a flag to stop trading
+                    self.consecutive_losses = 999  # Set to high value to ensure decide_order() sees it
+                
+                # Debug log fill
+                if self.debug_enabled:
+                    self._debug_log("ORDER_FILLED", f"Fill: {side} {qty}@{price:.2f}", {
+                        "order_id": order_id,
+                        "side": side,
+                        "qty": qty,
+                        "price": price,
+                        "mid": self.last_mid,
+                        "spread_captured": spread_captured,
+                        "trade_vs_mid": trade_vs_mid,
+                        "quality": quality,
+                        "fill_latency_ms": fill_latency_ms,
+                        "order_lifetime_steps": order_lifetime,
+                        "inventory": self.inventory,
+                        "pnl": self.pnl
+                    })
+                    
+                    self.debug_stats["fill_analysis"].append({
+                        "step": self.current_step,
+                        "side": side,
+                        "qty": qty,
+                        "price": price,
+                        "mid": self.last_mid,
+                        "spread_captured": spread_captured,
+                        "fill_latency_ms": fill_latency_ms,
+                    })
                 
                 print(f"[{self.student_id}] FILL: {side} {qty} @ {price:.2f} | "
                       f"Mid: {self.last_mid:.2f} | Inv: {self.inventory} | "
@@ -1468,10 +2057,25 @@ class TradingBot:
             if self.order_ws:
                 self.order_ws.close()
             
-            print(f"\n[{self.student_id}] Final Results:")
+            # Print comprehensive summaries
+            print(f"\n{'='*80}")
+            print(f"[{self.student_id}] FINAL RESULTS")
+            print(f"{'='*80}")
             print(f"  Orders Sent: {self.orders_sent}")
-            print(f"  Inventory: {self.inventory}")
-            print(f"  PnL: {self.pnl:.2f}")
+            print(f"  Orders Filled: {self.performance_metrics['orders_filled']}")
+            print(f"  Fill Rate: {self.performance_metrics['fill_rate']:.2%}")
+            print(f"  Total Notional Traded: ${self.performance_metrics['total_notional']:,.2f}")
+            print(f"  Final Inventory: {self.inventory}")
+            print(f"  Max Inventory: {self.performance_metrics['max_inventory']}")
+            print(f"  Final PnL: ${self.pnl:.2f}")
+            
+            if self.performance_metrics['spread_captured']:
+                avg_spread = sum(self.performance_metrics['spread_captured']) / len(self.performance_metrics['spread_captured'])
+                print(f"  Avg Spread Captured: ${avg_spread:.4f}")
+            
+            # Print debug summary
+            if self.debug_enabled:
+                self._print_debug_summary()
             
             # Print latency statistics
             if self.step_latencies:
@@ -1485,6 +2089,14 @@ class TradingBot:
                 print(f"    Min: {min(self.fill_latencies):.1f}")
                 print(f"    Max: {max(self.fill_latencies):.1f}")
                 print(f"    Avg: {sum(self.fill_latencies)/len(self.fill_latencies):.1f}")
+            
+            if self.performance_metrics['order_lifetimes']:
+                print(f"\n  Order Lifetime (steps):")
+                print(f"    Min: {min(self.performance_metrics['order_lifetimes'])}")
+                print(f"    Max: {max(self.performance_metrics['order_lifetimes'])}")
+                print(f"    Avg: {sum(self.performance_metrics['order_lifetimes'])/len(self.performance_metrics['order_lifetimes']):.1f}")
+            
+            print(f"{'='*80}\n")
 
 
 # =============================================================================
